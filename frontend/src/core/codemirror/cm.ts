@@ -4,6 +4,8 @@ import {
   autocompletion,
   closeBrackets,
   closeBracketsKeymap,
+  completeFromList,
+  snippetCompletion,
 } from "@codemirror/autocomplete";
 import {
   history,
@@ -135,6 +137,7 @@ export const basicBundle = (
     // keymap is Ctrl+Space)
     autocompletion({
       activateOnTyping: completionConfig.activate_on_typing,
+      icons: true,
       // The Cell component handles the blur event. `closeOnBlur` is too
       // aggressive and doesn't let the user click into the completion info
       // element (which contains the docstring/type --- users might want to
@@ -142,7 +145,26 @@ export const basicBundle = (
       // tooltip is not part of the editable DOM tree:
       // https://discuss.codemirror.net/t/adding-click-event-listener-to-autocomplete-tooltip-info-panel-is-not-working/4741
       closeOnBlur: false,
-      override: [completer],
+      override: [
+        completer,
+        completeFromList([
+          snippetCompletion('mo.md(f"#{}")', {
+            label: "mo.md",
+            info: "Markdown",
+            section: "Snippets",
+          }),
+          snippetCompletion("mo.hstack([#{}])", {
+            label: "mo.hstack",
+            info: "Horizontally stack elements",
+            section: "Snippets",
+          }),
+          snippetCompletion("mo.vstack([#{}])", {
+            label: "mo.vstack",
+            info: "Vertically stack elements",
+            section: "Snippets",
+          }),
+        ]),
+      ],
     }),
     copilotBundle(),
     foldGutter(),
