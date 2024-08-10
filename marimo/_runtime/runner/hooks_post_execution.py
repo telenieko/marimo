@@ -29,6 +29,7 @@ from marimo._plugins.ui._core.ui_element import UIElement
 from marimo._runtime.context.types import get_global_context
 from marimo._runtime.control_flow import MarimoInterrupt, MarimoStopError
 from marimo._runtime.runner import cell_runner
+from marimo._runtime.state import State, StateRegistry
 from marimo._utils.flatten import contains_instance
 
 LOGGER = _loggers.marimo_logger()
@@ -127,6 +128,19 @@ def _store_reference_to_output(
     elif run_result.output is not None:
         if contains_instance(run_result.output, UIElement):
             cell.set_output(run_result.output)
+
+
+def _store_state_reference(
+    cell: CellImpl,
+    runner: cell_runner.Runner,
+    run_result: cell_runner.RunResult,
+) -> None:
+    del run_result
+    for variable in cell.defs:
+        lookup = runner.glbls.get(variable, None)
+        if isinstance(lookup, State):
+            StateRegistry.register(variable, lookup)
+    StateRegistry.retain_active_states(set(runner.glbls.keys()))
 
 
 def _broadcast_outputs(
@@ -244,6 +258,7 @@ def _reset_matplotlib_context(
 
 POST_EXECUTION_HOOKS: list[PostExecutionHookType] = [
     _store_reference_to_output,
+    _store_state_reference,
     _broadcast_variables,
     _broadcast_datasets,
     _broadcast_duckdb_tables,
