@@ -1,7 +1,9 @@
 # Copyright 2024 Marimo. All rights reserved.
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
 from textwrap import dedent
 from typing import TYPE_CHECKING, List, Optional, Union, cast
 
@@ -10,14 +12,16 @@ from marimo._ast.app import App, InternalApp, _AppConfig
 from marimo._ast.cell import Cell, CellConfig
 from marimo._ast.compiler import compile_cell
 from marimo._messaging.cell_output import CellOutput
-from marimo._output.formatting import as_html
+from marimo._output.formatting import as_html, mime_to_html
 from marimo._output.utils import uri_encode_component
-from marimo._plugins.stateless.json_output import json_output
 from marimo._plugins.ui import code_editor
 from marimo._server.export import run_app_until_completion
 from marimo._server.file_manager import AppFileManager
 from marimo._server.file_router import AppFileRouter
 from marimo._utils.marimo_path import MarimoPath
+
+if sys.platform == "win32":  # handling for windows
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 if TYPE_CHECKING:
     from marimo._server.session.session_view import SessionView
@@ -97,13 +101,19 @@ class MarimoIslandStub:
         if not (display_code or display_output or is_reactive):
             raise ValueError("You must include either code or output")
 
-        output = handle_mimetypes(self.output) if self.output else None
+        output = (
+            mime_to_html(self.output.mimetype, self.output.data)
+            if self.output is not None
+            else None
+        )
 
         # Specifying display_code=False will hide the code block, but still
         # make it present for reactivity, unless reactivity is disabled.
         if display_code:
             # TODO: Allow for non-disabled code editors.
-            code_block = as_html(code_editor(self.code, disabled=False)).text
+            code_block = as_html(
+                code_editor(self.code.strip(), disabled=False)
+            ).text
         else:
             code_block = (
                 "<marimo-cell-code hidden>"
@@ -122,13 +132,13 @@ class MarimoIslandStub:
             data-reactive="{json.dumps(is_reactive)}"
         >
             <marimo-cell-output>
-            {output if output and display_output else ""}
+            {output.text if output and display_output else ""}
             </marimo-cell-output>
             {code_block}
         </marimo-island>
         """
-            ).strip()
-        )
+            )
+        ).strip()
 
 
 class MarimoIslandGenerator:
@@ -147,29 +157,62 @@ class MarimoIslandGenerator:
 
     # Example
 
+    Using the MarimoIslandGenerator class:
+    ```python
+    import asyncio
+    import sys
+    from marimo import MarimoIslandGenerator
+
+    async def main():
+        generator = MarimoIslandGenerator()
+        block1 = generator.add_code("import marimo as mo")
+        block2 = generator.add_code("mo.md('Hello, islands!')")
+
+        # Build the app
+        app = await generator.build()
+
+        # Render the app
+        output = f\"\"\"
+        <html>
+            <head>
+                {generator.render_head()}
+            </head>
+            <body>
+                {block1.render(display_output=False)}
+                {block2.render()}
+            </body>
+        </html>
+        \"\"\"
+        print(output)
+        # Save the HTML to a file
+        output_file = "output.html"
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(output)
+
+    if __name__ == '__main__':
+        asyncio.run(main())
+    ```
+
+    You can also create the generator from a file:
+
     ```python
     from marimo import MarimoIslandGenerator
 
-    generator = MarimoIslandGenerator()
-    block1 = generator.add_code("import marimo as mo")
-    block2 = generator.add_code("mo.md('Hello, islands!')")
+    # Create the generator from file
+    generator = MarimoIslandGenerator.from_file(
+        "./<notebook-name>.py", display_code=False
+    )
 
-    # Build the app
-    app = await generator.build()
-
-    # Render the app
-    output = f\"\"\"
-    <html>
-        <head>
-            {generator.render_head()}
-        </head>
-        <body>
-            {block1.render(display_output=False)}
-            {block2.render()}
-        </body>
-    </html>
-    \"\"\"
+    # Generate and print the HTML without building
+    # This will still work for basic rendering, though without running the cells
+    html = generator.render_html(include_init_island=False)
+    print(html)
+    # Save the HTML to a file
+    output_file = "output.html"
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write(html)
     ```
+
     """
 
     def __init__(self, app_id: str = "main"):
@@ -268,10 +311,11 @@ class MarimoIslandGenerator:
         if self.has_run:
             raise ValueError("You can only call build() once")
 
-        session = await run_app_until_completion(
+        (session, did_error) = await run_app_until_completion(
             file_manager=AppFileManager.from_app(self._app),
             cli_args={},
         )
+        del did_error
         self.has_run = True
 
         for stub in self._stubs:
@@ -284,7 +328,7 @@ class MarimoIslandGenerator:
         self,
         *,
         version_override: str = __version__,
-        _development_url: Union[str | bool] = False,
+        _development_url: Union[str, bool] = False,
     ) -> str:
         """
         Render the header for the app.
@@ -341,6 +385,11 @@ class MarimoIslandGenerator:
                 """
             ).strip()
 
+        marimo_tags = """
+        <marimo-filename hidden></marimo-filename>
+        <marimo-mode data-mode='read' hidden></marimo-mode>
+        """.strip()
+
         return dedent(
             f"""
             <script type="module" src="{base_url}/dist/main.js"></script>
@@ -350,6 +399,7 @@ class MarimoIslandGenerator:
                 crossorigin="anonymous"
             />
             {fonts}
+            {marimo_tags}
             """
         ).strip()
 
@@ -361,10 +411,9 @@ class MarimoIslandGenerator:
         """
 
         init_cell_id = self._app.cell_manager.create_cell_id()
-        init_input = "<marimo-cell-code hidden> '' </marimo-cell-code>"
         init_output = """
-        <div class="marimo" style="--tw-bg-opacity: 0;">
-          <div class="flex flex-col items-center justify-center">
+        <div class="marimo">
+          <div class="flex flex-col flex-1 items-center justify-center">
             <svg
               xmlns="http://www.w3.org/2000/svg"
               width="24"
@@ -388,12 +437,12 @@ class MarimoIslandGenerator:
             <marimo-island
                 data-app-id="{self._app_id}"
                 data-cell-id="{init_cell_id}"
-                data-reactive="{json.dumps(True)}"
+                data-reactive="{json.dumps(False)}"
             >
                 <marimo-cell-output>
                 {init_output}
                 </marimo-cell-output>
-                {init_input}
+                <marimo-cell-code hidden></marimo-cell-code>
             </marimo-island>
             """
         ).strip()
@@ -455,7 +504,7 @@ class MarimoIslandGenerator:
         self,
         *,
         version_override: str = __version__,
-        _development_url: Union[str | bool] = False,
+        _development_url: Union[str, bool] = False,
         include_init_island: bool = True,
         max_width: Optional[str] = None,
         margin: Optional[str] = None,
@@ -507,19 +556,3 @@ class MarimoIslandGenerator:
 
 def remove_empty_lines(text: str) -> str:
     return "\n".join([line for line in text.split("\n") if line.strip() != ""])
-
-
-def handle_mimetypes(output: CellOutput) -> str:
-    data = output.data
-    if not isinstance(data, str):
-        return f"{data}"
-    mimetype = output.mimetype
-    # Since raw data, without wrapping in an image tag, this is just a huge
-    # blob.
-    if mimetype.startswith("image/"):
-        data = f"<img src='{data}'/>"
-    elif mimetype == "application/json":
-        data = f"{json_output(json.loads(data))}"
-    # TODO: Errors are displayed as just json strings until reactivity kicks
-    # in. Ideally, handle application/vnd.marimo+error
-    return data

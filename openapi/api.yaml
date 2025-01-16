@@ -1,9 +1,48 @@
 components:
   schemas:
+    AddPackageRequest:
+      properties:
+        package:
+          type: string
+      required:
+      - package
+      type: object
     AiCompletionRequest:
       properties:
         code:
           type: string
+        context:
+          nullable: true
+          properties:
+            schema:
+              items:
+                properties:
+                  columns:
+                    items:
+                      properties:
+                        name:
+                          type: string
+                        sampleValues:
+                          items: {}
+                          type: array
+                        type:
+                          type: string
+                      required:
+                      - name
+                      - type
+                      - sampleValues
+                      type: object
+                    type: array
+                  name:
+                    type: string
+                required:
+                - name
+                - columns
+                type: object
+              type: array
+          required:
+          - schema
+          type: object
         includeOtherCode:
           type: string
         language:
@@ -116,6 +155,9 @@ components:
       type: string
     CellConfig:
       properties:
+        column:
+          nullable: true
+          type: integer
         disabled:
           type: boolean
         hide_code:
@@ -142,6 +184,9 @@ components:
         output:
           $ref: '#/components/schemas/CellOutput'
           nullable: true
+        run_id:
+          nullable: true
+          type: string
         stale_inputs:
           nullable: true
           type: boolean
@@ -275,8 +320,20 @@ components:
       - options
       - name
       type: object
+    CopyNotebookRequest:
+      properties:
+        destination:
+          type: string
+        source:
+          type: string
+      required:
+      - source
+      - destination
+      type: object
     CreationRequest:
       properties:
+        autoRun:
+          type: boolean
         executionRequests:
           items:
             $ref: '#/components/schemas/ExecutionRequest'
@@ -286,6 +343,7 @@ components:
       required:
       - executionRequests
       - setUiElementValueRequest
+      - autoRun
       type: object
     CycleError:
       properties:
@@ -373,12 +431,16 @@ components:
           type: string
         name:
           type: string
+        sample_values:
+          items: {}
+          type: array
         type:
           $ref: '#/components/schemas/DataType'
       required:
       - name
       - type
       - external_type
+      - sample_values
       type: object
     DataType:
       enum:
@@ -387,6 +449,8 @@ components:
       - integer
       - number
       - date
+      - datetime
+      - time
       - unknown
       type: string
     Datasets:
@@ -444,6 +508,7 @@ components:
       - $ref: '#/components/schemas/MarimoStrictExecutionError'
       - $ref: '#/components/schemas/MarimoInterruptionError'
       - $ref: '#/components/schemas/MarimoSyntaxError'
+      - $ref: '#/components/schemas/MarimoInternalError'
       - $ref: '#/components/schemas/UnknownError'
     ExecuteMultipleRequest:
       properties:
@@ -502,6 +567,13 @@ components:
       - download
       - files
       - includeCode
+      type: object
+    ExportAsIPYNBRequest:
+      properties:
+        download:
+          type: boolean
+      required:
+      - download
       type: object
     ExportAsMarkdownRequest:
       properties:
@@ -764,8 +836,13 @@ components:
       properties:
         manager:
           type: string
+        versions:
+          additionalProperties:
+            type: string
+          type: object
       required:
       - manager
+      - versions
       type: object
     InstallingPackageAlert:
       properties:
@@ -788,6 +865,8 @@ components:
       type: object
     InstantiateRequest:
       properties:
+        autoRun:
+          type: boolean
         objectIds:
           items:
             type: string
@@ -798,6 +877,7 @@ components:
       required:
       - objectIds
       - values
+      - autoRun
       type: object
     Interrupted:
       properties:
@@ -823,6 +903,19 @@ components:
             app_title:
               nullable: true
               type: string
+            auto_download:
+              items:
+                enum:
+                - html
+                - markdown
+                type: string
+              type: array
+            css_file:
+              nullable: true
+              type: string
+            html_head_file:
+              nullable: true
+              type: string
             layout_file:
               nullable: true
               type: string
@@ -835,6 +928,7 @@ components:
               type: string
           required:
           - width
+          - auto_download
           type: object
         capabilities:
           properties:
@@ -906,6 +1000,8 @@ components:
             - type: integer
             - type: number
             - type: boolean
+            - additionalProperties: true
+              type: object
             - $ref: '#/components/schemas/MIME'
           nullable: true
           type: object
@@ -919,6 +1015,15 @@ components:
       - kiosk
       - capabilities
       - name
+      type: object
+    ListPackagesResponse:
+      properties:
+        packages:
+          items:
+            $ref: '#/components/schemas/PackageDescription'
+          type: array
+      required:
+      - packages
       type: object
     MIME:
       properties: {}
@@ -960,6 +1065,16 @@ components:
       properties:
         ai:
           properties:
+            anthropic:
+              properties:
+                api_key:
+                  type: string
+              type: object
+            google:
+              properties:
+                api_key:
+                  type: string
+              type: object
             open_ai:
               properties:
                 api_key:
@@ -968,13 +1083,9 @@ components:
                   type: string
                 model:
                   type: string
-              required:
-              - api_key
-              - model
-              - base_url
               type: object
-          required:
-          - open_ai
+            rules:
+              type: string
           type: object
         completion:
           properties:
@@ -993,7 +1104,6 @@ components:
           required:
           - activate_on_typing
           - copilot
-          - codeium_api_key
           type: object
         display:
           properties:
@@ -1052,7 +1162,6 @@ components:
               type: string
           required:
           - preset
-          - overrides
           type: object
         package_management:
           properties:
@@ -1126,8 +1235,6 @@ components:
       - save
       - server
       - package_management
-      - ai
-      - experimental
       type: object
     MarimoExceptionRaisedError:
       properties:
@@ -1165,6 +1272,21 @@ components:
       required:
       - name
       - path
+      type: object
+    MarimoInternalError:
+      properties:
+        error_id:
+          type: string
+        msg:
+          type: string
+        type:
+          enum:
+          - internal
+          type: string
+      required:
+      - error_id
+      - type
+      - msg
       type: object
     MarimoInterruptionError:
       properties:
@@ -1237,6 +1359,9 @@ components:
       - application/json
       - application/vnd.marimo+error
       - application/vnd.marimo+traceback
+      - application/vnd.marimo+mimebundle
+      - application/vnd.vega.v5+json
+      - application/vnd.vegalite.v5+json
       - image/png
       - image/svg+xml
       - image/tiff
@@ -1249,6 +1374,7 @@ components:
       - text/html
       - text/plain
       - text/markdown
+      - text/latex
       - text/csv
       type: string
     MissingPackageAlert:
@@ -1307,6 +1433,47 @@ components:
           type: string
       required:
       - path
+      type: object
+    OpenTutorialRequest:
+      properties:
+        tutorialId:
+          oneOf:
+          - enum:
+            - intro
+            - dataflow
+            - ui
+            - markdown
+            - plots
+            - sql
+            - layout
+            - fileformat
+            - for-jupyter-users
+            type: string
+          - enum:
+            - markdown-format
+            type: string
+      required:
+      - tutorialId
+      type: object
+    PackageDescription:
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+      required:
+      - name
+      - version
+      type: object
+    PackageOperationResponse:
+      properties:
+        error:
+          nullable: true
+          type: string
+        success:
+          type: boolean
+      required:
+      - success
       type: object
     PreviewDatasetColumnRequest:
       properties:
@@ -1418,6 +1585,13 @@ components:
           type: string
       required:
       - name
+      type: object
+    RemovePackageRequest:
+      properties:
+        package:
+          type: string
+      required:
+      - package
       type: object
     RemoveUIElements:
       properties:
@@ -1663,6 +1837,8 @@ components:
           items:
             type: string
           type: array
+        code_is_stale:
+          type: boolean
         codes:
           items:
             type: string
@@ -1674,6 +1850,7 @@ components:
       required:
       - cell_ids
       - codes
+      - code_is_stale
       - name
       type: object
     UpdateCellIdsRequest:
@@ -1782,7 +1959,7 @@ components:
       type: object
 info:
   title: marimo API
-  version: 0.8.0
+  version: 0.10.13
 openapi: 3.1.0
 paths:
   /@file/{filename_and_length}:
@@ -1843,6 +2020,54 @@ paths:
               schema:
                 $ref: '#/components/schemas/Snippets'
           description: Load the snippets for the documentation page
+  /api/export/auto_export/html:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportAsHTMLRequest'
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+          description: Export the notebook as HTML
+        400:
+          description: File must be saved before downloading
+  /api/export/auto_export/ipynb:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportAsIPYNBRequest'
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+          description: Export the notebook as IPYNB
+        400:
+          description: File must be saved before downloading
+  /api/export/auto_export/markdown:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportAsMarkdownRequest'
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+          description: Export the notebook as a markdown
+        400:
+          description: File must be saved before downloading
   /api/export/html:
     post:
       requestBody:
@@ -2007,6 +2232,20 @@ paths:
               schema:
                 $ref: '#/components/schemas/RunningNotebooksResponse'
           description: Shutdown the current session
+  /api/home/tutorial/open:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpenTutorialRequest'
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarimoFile'
+          description: Open a new tutorial
   /api/home/workspace_files:
     post:
       requestBody:
@@ -2035,6 +2274,20 @@ paths:
               schema:
                 $ref: '#/components/schemas/SuccessResponse'
           description: Complete a code fragment
+  /api/kernel/copy:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CopyNotebookRequest'
+      responses:
+        200:
+          content:
+            text/plain:
+              schema:
+                type: string
+          description: Copy notebook
   /api/kernel/delete:
     post:
       requestBody:
@@ -2301,6 +2554,55 @@ paths:
               schema:
                 $ref: '#/components/schemas/SuccessResponse'
           description: Sync cell ids
+  /api/kernel/takeover:
+    post:
+      responses: null
+      200:
+        content:
+          application/json:
+            schema:
+              properties:
+                status:
+                  type: string
+              type: object
+        description: Successfully closed existing sessions
+  /api/packages/add:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddPackageRequest'
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PackageOperationResponse'
+          description: Install package
+  /api/packages/list:
+    get:
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListPackagesResponse'
+          description: List installed packages
+  /api/packages/remove:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemovePackageRequest'
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PackageOperationResponse'
+          description: Uninstall package
   /api/status:
     get:
       responses:
@@ -2331,6 +2633,18 @@ paths:
                     type: string
                 type: object
           description: Get the status of the application
+  /api/status/connections:
+    get:
+      responses:
+        200:
+          content:
+            application/json:
+              schema:
+                properties:
+                  active:
+                    type: integer
+                type: object
+          description: Get the number of active websocket connections
   /api/usage:
     get:
       responses:

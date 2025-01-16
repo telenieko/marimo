@@ -6,6 +6,11 @@ from typing import Any, Optional
 from marimo import _loggers
 from marimo._data.charts import get_chart_builder
 from marimo._data.models import ColumnSummary
+from marimo._data.sql_summaries import (
+    get_column_type,
+    get_histogram_data,
+    get_sql_summary,
+)
 from marimo._dependencies.dependencies import DependencyManager
 from marimo._messaging.ops import DataColumnPreview
 from marimo._plugins.ui._impl.tables.table_manager import TableManager
@@ -15,7 +20,7 @@ from marimo._runtime.requests import PreviewDatasetColumnRequest
 LOGGER = _loggers.marimo_logger()
 
 
-def get_column_preview(
+def get_column_preview_dataframe(
     item: object,
     request: PreviewDatasetColumnRequest,
 ) -> DataColumnPreview | None:
@@ -40,7 +45,9 @@ def get_column_preview(
         # Get the summary of the column
         try:
             summary = table.get_summary(column_name)
-        except Exception as e:
+        except BaseException as e:
+            # Catch-all: some libraries like Polars have bugs and raise
+            # BaseExceptions, which shouldn't crash the kernel
             LOGGER.warning(
                 "Failed to get summary for column %s in table %s",
                 column_name,
@@ -109,6 +116,48 @@ def get_column_preview(
         )
 
 
+def get_column_preview_for_sql(
+    table_name: str,
+    column_name: str,
+) -> Optional[DataColumnPreview]:
+    # Only show column previews for in-memory tables
+    # otherwise we could be making requests to postgres/mysql/etc
+    # that the user may not intend to do so.
+    if not table_name.startswith("memory.main."):
+        return DataColumnPreview(
+            table_name=table_name,
+            column_name=column_name,
+            error="Previews only supported for in-memory tables",
+        )
+    query_table_name = table_name.replace("memory.main.", "")
+
+    column_type = get_column_type(query_table_name, column_name)
+    summary = get_sql_summary(query_table_name, column_name, column_type)
+    histogram_data = get_histogram_data(query_table_name, column_name)
+
+    # Generate Altair chart
+    chart_spec = None
+    chart_code = None
+    chart_max_rows_errors = False
+
+    if histogram_data and DependencyManager.altair.has():
+        chart_builder = get_chart_builder(column_type, False)
+        try:
+            chart_spec = chart_builder.altair_json(histogram_data, column_name)
+        except Exception as e:
+            LOGGER.warning(f"Failed to generate Altair chart: {str(e)}")
+
+    return DataColumnPreview(
+        table_name=table_name,
+        column_name=column_name,
+        chart_max_rows_errors=chart_max_rows_errors,
+        chart_spec=chart_spec,
+        chart_code=chart_code,
+        summary=summary,
+        error=None,
+    )
+
+
 def _get_altair_chart(
     request: PreviewDatasetColumnRequest,
     table: TableManager[Any],
@@ -123,9 +172,10 @@ def _get_altair_chart(
         MaxRowsError,
     )
 
-    (column_type, _external_type) = table.get_field_types()[
-        request.column_name
-    ]
+    (column_type, _external_type) = table.get_field_type(request.column_name)
+
+    if summary.total == 0:
+        return None, None, False
 
     # For categorical columns with more than 10 unique values,
     # we limit the chart to 10 items
@@ -148,7 +198,11 @@ def _get_altair_chart(
         column_data = table.select_columns([request.column_name]).data
         # Date types don't serialize well to csv,
         # so we don't transform them
-        if column_type == "date":
+        if (
+            column_type == "date"
+            or column_type == "datetime"
+            or column_type == "time"
+        ):
             # Default max_rows is 5_000, but we can support more.
             with alt.data_transformers.enable("default", max_rows=20_000):
                 chart_json = chart_builder.altair_json(

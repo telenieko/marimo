@@ -1,5 +1,5 @@
 /* Copyright 2024 Marimo. All rights reserved. */
-import { type Page, expect } from "@playwright/test";
+import { type Locator, type Page, expect } from "@playwright/test";
 import { HotkeyProvider, type HotkeyAction } from "../src/core/hotkeys/hotkeys";
 import path from "node:path";
 
@@ -35,6 +35,15 @@ export async function createCellBelow(opts: {
   }
 }
 
+export async function openCellActions(page: Page, element: Locator) {
+  await element.hover();
+  await page
+    .getByTestId("cell-actions-button")
+    .locator(":visible")
+    .first()
+    .click();
+}
+
 export async function runCell(opts: { page: Page; cellSelector: string }) {
   const { page, cellSelector } = opts;
 
@@ -49,7 +58,7 @@ const countsForName: Record<string, number> = {};
 /**
  * Take a screenshot of the page.
  * @example
- * await takeScreenshot(page, __filename);
+ * await takeScreenshot(page, _filename);
  */
 export async function takeScreenshot(page: Page, filename: string) {
   const clean = path.basename(filename).replace(".spec.ts", "");
@@ -170,7 +179,7 @@ export async function maybeRestartKernel(page: Page) {
 
   await page.getByTestId("notebook-menu-dropdown").click();
   await page.getByText("Restart kernel", { exact: true }).click();
-  await page.getByText("Restart", { exact: true }).click();
+  await page.getByLabel("Confirm Restart", { exact: true }).click();
 }
 
 /**

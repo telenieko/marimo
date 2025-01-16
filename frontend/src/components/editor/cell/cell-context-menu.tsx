@@ -14,6 +14,7 @@ import {
 import { renderMinimalShortcut } from "@/components/shortcuts/renderShortcut";
 import type { ActionButton } from "../actions/types";
 import {
+  ClipboardCopyIcon,
   ClipboardPasteIcon,
   CopyIcon,
   ImageIcon,
@@ -21,6 +22,11 @@ import {
   SearchIcon,
 } from "lucide-react";
 import { goToDefinitionAtCursorPosition } from "@/core/codemirror/go-to-definition/utils";
+import { CellOutputId } from "@/core/cells/ids";
+import { Logger } from "@/utils/Logger";
+import { copyToClipboard } from "@/utils/copy";
+import { toast } from "@/components/ui/use-toast";
+import { sendToPanelManager } from "@/core/vscode/vscode-bindings";
 
 interface Props extends CellActionButtonProps {
   children: React.ReactNode;
@@ -34,13 +40,31 @@ export const CellActionsContextMenu = ({ children, ...props }: Props) => {
   const DEFAULT_CONTEXT_MENU_ITEMS: ActionButton[] = [
     {
       label: "Copy",
+      hidden: Boolean(imageRightClicked),
       icon: <CopyIcon size={13} strokeWidth={1.5} />,
-      handle: () => {
-        document.execCommand("copy");
+      handle: async () => {
+        // Has selection, use browser copy
+        const hasSelection = window.getSelection()?.toString();
+        if (hasSelection) {
+          document.execCommand("copy");
+          return;
+        }
+
+        // No selection, copy the full cell output
+        const output = document.getElementById(
+          CellOutputId.create(props.cellId),
+        );
+        if (!output) {
+          Logger.warn("cell-context-menu: output not found");
+          return;
+        }
+        // Copy the output of the cell
+        await copyToClipboard(output.textContent ?? "");
       },
     },
     {
       label: "Cut",
+      hidden: Boolean(imageRightClicked),
       icon: <ScissorsIcon size={13} strokeWidth={1.5} />,
       handle: () => {
         document.execCommand("cut");
@@ -48,6 +72,7 @@ export const CellActionsContextMenu = ({ children, ...props }: Props) => {
     },
     {
       label: "Paste",
+      hidden: Boolean(imageRightClicked),
       icon: <ClipboardPasteIcon size={13} strokeWidth={1.5} />,
       handle: async () => {
         const { getEditorView } = props;
@@ -57,16 +82,49 @@ export const CellActionsContextMenu = ({ children, ...props }: Props) => {
         }
         // We can't use the native browser paste since we don't have focus
         // so instead we use the editorViewView
-        const clipText = await navigator.clipboard.readText();
-        if (clipText) {
-          // Get the current selection, or the start of the document if nothing is selected
-          const { from, to } = editorView.state.selection.main;
-          // Create a new transaction that replaces the selection with the clipboard text
-          const tr = editorView.state.update({
-            changes: { from, to, insert: clipText },
-          });
-          // Apply the transaction
-          editorView.dispatch(tr);
+        try {
+          const clipText = await navigator.clipboard.readText();
+          if (clipText) {
+            // Get the current selection, or the start of the document if nothing is selected
+            const { from, to } = editorView.state.selection.main;
+            // Create a new transaction that replaces the selection with the clipboard text
+            const tr = editorView.state.update({
+              changes: { from, to, insert: clipText },
+            });
+            // Apply the transaction
+            editorView.dispatch(tr);
+          }
+        } catch (error) {
+          Logger.error("Failed to paste from clipboard", error);
+          // Try vscode or other parent
+          sendToPanelManager({ command: "paste" });
+        }
+      },
+    },
+    {
+      label: "Copy image",
+      hidden: !imageRightClicked,
+      icon: <ClipboardCopyIcon size={13} strokeWidth={1.5} />,
+      handle: async () => {
+        if (imageRightClicked) {
+          const response = await fetch(imageRightClicked.src);
+          const blob = await response.blob();
+          const item = new ClipboardItem({ [blob.type]: blob });
+          await navigator.clipboard
+            .write([item])
+            .then(() => {
+              toast({
+                title: "Copied image to clipboard",
+              });
+            })
+            .catch((error) => {
+              toast({
+                title:
+                  "Failed to copy image to clipboard. Try downloading instead.",
+                description: error.message,
+              });
+              Logger.error("Failed to copy image to clipboard", error);
+            });
         }
       },
     },
@@ -127,7 +185,9 @@ export const CellActionsContextMenu = ({ children, ...props }: Props) => {
                 >
                   <div className="flex items-center flex-1">
                     {action.icon && (
-                      <div className="mr-2 w-5">{action.icon}</div>
+                      <div className="mr-2 w-5 text-muted-foreground">
+                        {action.icon}
+                      </div>
                     )}
                     <div className="flex-1">{action.label}</div>
                     <div className="flex-shrink-0 text-sm">

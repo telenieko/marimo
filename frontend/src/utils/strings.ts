@@ -40,4 +40,12 @@ export const Strings = {
   withoutTrailingSlash(url: string): string {
     return url.endsWith("/") ? url.slice(0, -1) : url;
   },
+  withoutLeadingSlash(url: string): string {
+    return url.startsWith("/") ? url.slice(1) : url;
+  },
+};
+
+export const decodeUtf8 = (array: Uint8Array): string => {
+  const str = new TextDecoder().decode(array);
+  return str;
 };

@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import base64
 import tempfile
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
-from marimo._config.manager import UserConfigManager
+from marimo._config.manager import get_default_config_manager
 from marimo._server.file_router import AppFileRouter
 from marimo._server.model import SessionMode
 from marimo._server.sessions import NoopLspServer, SessionManager
@@ -13,7 +13,7 @@ from marimo._server.tokens import AuthToken, SkewProtectionToken
 from marimo._utils.marimo_path import MarimoPath
 
 if TYPE_CHECKING:
-    from fastapi.testclient import TestClient
+    from starlette.testclient import TestClient
 
 
 def get_session_manager(client: TestClient) -> SessionManager:
@@ -53,9 +53,11 @@ if __name__ == "__main__":
         quiet=False,
         include_code=True,
         lsp_server=lsp_server,
-        user_config_manager=UserConfigManager(),
+        user_config_manager=get_default_config_manager(current_path=None),
         cli_args={},
         auth_token=AuthToken("fake-token"),
+        redirect_console_to_browser=False,
+        ttl_seconds=None,
     )
     sm.skew_protection_token = SkewProtectionToken("skew-id-1")
     return sm
@@ -90,7 +92,10 @@ def with_session(
     """Decorator to create a session and close it after the test"""
 
     def decorator(func: Callable[..., None]) -> Callable[..., None]:
-        def wrapper(client: TestClient) -> None:
+        def wrapper(
+            client: TestClient,
+            temp_marimo_file: Optional[str],
+        ) -> None:
             auth_token = get_session_manager(client).auth_token
             headers = token_header(auth_token)
 
@@ -99,7 +104,13 @@ def with_session(
             ) as websocket:
                 data = websocket.receive_text()
                 assert data
-                func(client)
+                if "temp_marimo_file" in func.__code__.co_varnames:
+                    func(
+                        client,
+                        temp_marimo_file=temp_marimo_file,
+                    )
+                else:
+                    func(client)
             # shutdown after websocket exits, otherwise
             # test fails on Windows (loop closed twice)
             if auto_shutdown:

@@ -8,10 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
-from packaging import version
-
 from marimo import __version__ as current_version
-from marimo._cli.print import green, orange
+from marimo._cli.print import echo, green, orange
 from marimo._server.api.status import HTTPException
 from marimo._tracer import server_tracer
 from marimo._utils.config.config import ConfigReader
@@ -27,9 +25,9 @@ class MarimoCLIState:
 
 def print_latest_version(current_version: str, latest_version: str) -> None:
     message = f"Update available {current_version} → {latest_version}"
-    print(orange(message))
-    print(f"Run {green('pip install --upgrade marimo')} to upgrade.")
-    print()
+    echo(orange(message))
+    echo(f"Run {green('pip install --upgrade marimo')} to upgrade.")
+    echo()
 
 
 @server_tracer.start_as_current_span("check_for_updates")
@@ -43,6 +41,8 @@ def check_for_updates(on_update: Callable[[str, str], None]) -> None:
 
 
 def _check_for_updates_internal(on_update: Callable[[str, str], None]) -> None:
+    from packaging import version
+
     config_reader = ConfigReader.for_filename("state.toml")
     if not config_reader:
         # Couldn't find home directory, so do nothing
@@ -73,7 +73,7 @@ def _check_for_updates_internal(on_update: Callable[[str, str], None]) -> None:
 def _update_with_latest_version(state: MarimoCLIState) -> MarimoCLIState:
     """
     If we have not saved the latest version,
-    or its newer than the one we have, update it.
+    or it's newer than the one we have, update it.
     """
     # querying pypi is +250kb and there is not a better API
     # this endpoint just returns the version
@@ -84,15 +84,18 @@ def _update_with_latest_version(state: MarimoCLIState) -> MarimoCLIState:
     else:
         api_url = "https://marimo.io/api/oss/latest-version"
 
-    # Check if it is a different day
+    # We only update the state once a day
     if state.last_checked_at:
         last_checked_date = datetime.strptime(
             state.last_checked_at, "%Y-%m-%d"
         ).date()
+        now = datetime.now()
+        year = last_checked_date.timetuple().tm_year
+        today_year = now.timetuple().tm_year
         day_of_the_year = last_checked_date.timetuple().tm_yday
-        today_day_of_the_year = datetime.now().timetuple().tm_yday
-        if today_day_of_the_year == day_of_the_year:
-            # Same day of the year, so do nothing
+        today_day_of_the_year = now.timetuple().tm_yday
+        if year == today_year and today_day_of_the_year == day_of_the_year:
+            # Same day, so do nothing
             return state
 
     # Fetch the latest version from PyPI

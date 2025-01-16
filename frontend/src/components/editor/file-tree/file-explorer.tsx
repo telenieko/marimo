@@ -30,6 +30,7 @@ import {
   Trash2Icon,
   UploadIcon,
   ViewIcon,
+  DownloadIcon,
 } from "lucide-react";
 import type { FileInfo } from "@/core/network/types";
 import {
@@ -63,6 +64,9 @@ import { Spinner } from "@/components/icons/spinner";
 import type { RequestingTree } from "./requesting-tree";
 import type { FilePath } from "@/utils/paths";
 import useEvent from "react-use-event-hook";
+import { copyToClipboard } from "@/utils/copy";
+import { sendFileDetails } from "@/core/network/requests";
+import { downloadBlob } from "@/utils/download";
 
 const RequestingTreeContext = React.createContext<RequestingTree | null>(null);
 
@@ -444,9 +448,9 @@ const Node = ({ node, style, dragHandle }: NodeRendererProps<FileInfo>) => {
           Rename
         </DropdownMenuItem>
         <DropdownMenuItem
-          onSelect={() => {
+          onSelect={async () => {
+            await copyToClipboard(node.data.path);
             toast({ title: "Copied to clipboard" });
-            navigator.clipboard.writeText(node.data.path);
           }}
         >
           <CopyIcon {...iconProps} />
@@ -454,11 +458,11 @@ const Node = ({ node, style, dragHandle }: NodeRendererProps<FileInfo>) => {
         </DropdownMenuItem>
         {tree && (
           <DropdownMenuItem
-            onSelect={() => {
-              toast({ title: "Copied to clipboard" });
-              navigator.clipboard.writeText(
+            onSelect={async () => {
+              await copyToClipboard(
                 tree.relativeFromRoot(node.data.path as FilePath),
               );
+              toast({ title: "Copied to clipboard" });
             }}
           >
             <CopyIcon {...iconProps} />
@@ -466,7 +470,7 @@ const Node = ({ node, style, dragHandle }: NodeRendererProps<FileInfo>) => {
           </DropdownMenuItem>
         )}
         <DropdownMenuItem
-          onSelect={() => {
+          onSelect={async () => {
             toast({
               title: "Copied to clipboard",
               description:
@@ -474,7 +478,7 @@ const Node = ({ node, style, dragHandle }: NodeRendererProps<FileInfo>) => {
             });
             const { path } = node.data;
             const pythonCode = PYTHON_CODE_FOR_FILE_TYPE[fileType](path);
-            navigator.clipboard.writeText(pythonCode);
+            await copyToClipboard(pythonCode);
           }}
         >
           <BracesIcon {...iconProps} />
@@ -491,6 +495,21 @@ const Node = ({ node, style, dragHandle }: NodeRendererProps<FileInfo>) => {
           </>
         )}
         <DropdownMenuSeparator />
+        {!node.data.isDirectory && (
+          <>
+            <DropdownMenuItem
+              onSelect={async () => {
+                const details = await sendFileDetails({ path: node.data.path });
+                const contents = details.contents || "";
+                downloadBlob(new Blob([contents]), node.data.name);
+              }}
+            >
+              <DownloadIcon {...iconProps} />
+              Download
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+          </>
+        )}
         <DropdownMenuItem onSelect={handleDeleteFile} variant="danger">
           <Trash2Icon {...iconProps} />
           Delete
@@ -525,7 +544,7 @@ const Node = ({ node, style, dragHandle }: NodeRendererProps<FileInfo>) => {
       >
         {node.data.isMarimoFile ? (
           <img
-            src="/favicon.ico"
+            src="./favicon.ico"
             className="w-5 h-5 flex-shrink-0 mr-2 filter grayscale"
             alt="Marimo"
           />

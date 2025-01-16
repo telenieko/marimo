@@ -14,7 +14,7 @@ import type {
   OperationMessageData,
 } from "./messages";
 import type { LayoutType } from "@/components/editor/renderers/types";
-import type { AppConfig } from "../config/config-schema";
+import { AppConfigSchema, type AppConfig } from "../config/config-schema";
 import { type CellData, createCell } from "../cells/types";
 import { VirtualFileTracker } from "../static/virtual-file-tracker";
 import type { CellId, UIElementId } from "../cells/ids";
@@ -66,13 +66,9 @@ export function handleKernelReady(
     // A cell is stale if we did not auto-instantiate (i.e. nothing has run yet)
     // or if the code has changed since the last time it was run.
     let edited = false;
-    if (autoInstantiate || resumed) {
-      const lastCodeRun = lastExecutedCode[cellId];
-      if (lastCodeRun) {
-        edited = lastCodeRun !== code;
-      }
-    } else {
-      edited = true;
+    const lastCodeRun = lastExecutedCode[cellId];
+    if (lastCodeRun) {
+      edited = lastCodeRun !== code;
     }
 
     return createCell({
@@ -95,9 +91,10 @@ export function handleKernelReady(
     setLayoutData({ layoutView: layoutType, data: layoutData });
   }
   setCells(cells, layoutState);
-  setAppConfig({
-    ...app_config,
-  } as AppConfig);
+  const parsedAppConfig = AppConfigSchema.safeParse(app_config);
+  if (parsedAppConfig.success) {
+    setAppConfig(parsedAppConfig.data);
+  }
   setCapabilities({
     ...capabilities,
     // always enable sql if wasm
@@ -124,13 +121,14 @@ export function handleKernelReady(
     objectIds.push(objectId);
     values.push(entry.value);
   });
-  // Send the instantiate message
-  if (autoInstantiate) {
-    // Start the run
-    sendInstantiate({ objectIds: objectIds, values }).catch((error) => {
-      onError(new Error("Failed to instantiate", { cause: error }));
-    });
-  }
+  // Start the run
+  sendInstantiate({
+    objectIds: objectIds,
+    values,
+    autoRun: autoInstantiate,
+  }).catch((error) => {
+    onError(new Error("Failed to instantiate", { cause: error }));
+  });
 }
 
 export function handleRemoveUIElements(
@@ -139,9 +137,9 @@ export function handleRemoveUIElements(
   // This removes the element from the registry to (1) clean-up
   // memory and (2) make sure that the old value doesn't get re-used
   // if the same cell-id is later reused for another element.
-  const cell_id = data.cell_id as CellId;
-  UI_ELEMENT_REGISTRY.removeElementsByCell(cell_id);
-  VirtualFileTracker.INSTANCE.removeForCellId(cell_id);
+  const cellId = data.cell_id as CellId;
+  UI_ELEMENT_REGISTRY.removeElementsByCell(cellId);
+  VirtualFileTracker.INSTANCE.removeForCellId(cellId);
 }
 
 export function handleCellOperation(

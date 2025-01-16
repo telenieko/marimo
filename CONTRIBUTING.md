@@ -16,24 +16,28 @@ Before sending a pull request, make sure to do the following:
 _Please reach out to the marimo team before starting work on a large
 contribution._ Get in touch at
 [GitHub issues](https://github.com/marimo-team/marimo/issues)
-or [on Discord](https://discord.gg/JE7nhX6mD8).
+or [on Discord](https://marimo.io/discord?ref=contributing).
 
 ## Prerequisites
 
-To build marimo from source, you'll need to have Node.js, pnpm, GNU make, and
-Python (>=3.8) installed.
+To build marimo from source, you'll need to have Node.js, pnpm, GNU make, Python (>=3.9), and Hatch installed.
 
 - Install [Node.js](https://docs.npmjs.com/downloading-and-installing-node-js-and-npm#using-a-node-version-manager-to-install-nodejs-and-npm) >= 18
   - We use Node.js version 20
-- Install [pnpm](https://github.com/pnpm/pnpm) == 8.x
-  - `npm install -g pnpm@8`
+- Install [pnpm](https://github.com/pnpm/pnpm) == 9.x
+  - `npm install -g pnpm@9`
 - Install [GNU Make](https://www.gnu.org/software/make/) (you may already have it installed)
-- Install [Python](https://www.python.org/) >= 3.8. (You may already it installed. To see your version, use `python -V` at the command line.)
+- Install [Python](https://www.python.org/) >= 3.9. (You may already it installed. To see your version, use `python -V` at the command line.)
+- Install [Hatch](https://hatch.pypa.io/latest/install/). Some installation options:
+  - `brew install hatch`
+  - `pipx install hatch`
 
 And you'll need [pre-commit](https://pre-commit.com/) to run some validation checks:
 
 ```bash
-pipx install pre-commit  # or `pip install pre-commit` if you have a virtualenv
+pipx install pre-commit
+# or `pip install pre-commit` if you have a virtualenv
+# or `brew install pre-commit`
 ```
 
 You can optionally install pre-commit hooks to automatically run the validation checks
@@ -43,21 +47,35 @@ when making a commit:
 pre-commit install
 ```
 
+> [!NOTE]
+>
+> As an alternative to building from source, you can try developing
+> [in Gitpod](https://gitpod.io/#https://github.com/marimo-team/marimo).
+> Note that developing in Gitpod is not officially supported by the marimo
+> team.
+
 ## Building from source
 
 Be sure to install the dependencies above before building from source.
 
 ### Build from source
 
-After installing the dependencies, run the following in a fresh Python virtual
-environment (such as [venv](https://docs.python.org/3/library/venv.html) or
-[virtualenv](https://virtualenv.pypa.io/en/latest/)):
+After installing the dependencies, you can use either the traditional method (installing an editable wheel in your current venv) or use Hatch:
+
+Traditional method:
 
 ```bash
 make fe && make py
 ```
 
-`make fe` builds the frontend. `make py` does an [editable install](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) of marimo.
+Using Hatch:
+
+```bash
+make fe
+hatch shell
+```
+
+`make fe` builds the frontend. `make py` does an [editable install](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) of marimo, while `hatch shell` creates a Hatch environment with an editable install of marimo.
 
 (All `make` commands should be run in the project's root directory.)
 
@@ -77,6 +95,7 @@ NODE_OPTIONS=--max_old_space_size=8192 NODE_ENV=development make fe -B
 | `py`           | Setup     | Editable python install; only need to run once                 |
 | `install-all`  | Setup     | Install everything; takes a long time due to editable install  |
 | `fe`           | Build     | Package frontend into `marimo/`                                |
+| `fe-codegen`   | Build     | Build [api specification](./development_docs/openapi.md)       |
 | `wheel`        | Build     | Build wheel                                                    |
 | `check`        | Test      | Run all checks                                                 |
 | `check-test`   | Test      | Run all checks and tests                                       |
@@ -91,7 +110,7 @@ NODE_OPTIONS=--max_old_space_size=8192 NODE_ENV=development make fe -B
 | `py-snapshots` | Test      | Update HTML snapshots                                          |
 | `storybook`    | Docs      | Run Storybook                                                  |
 | `docs`         | Docs      | Build docs. Use `make ARGS="-a" docs` to force docs to rebuild |
-| `docs-auto`    | Docs      | Autobuild docs                                                 |
+| `docs-serve`   | Docs      | Serve docs                                                     |
 | `docs-clean`   | Docs      | Remove built docs                                              |
 
 ## Lint, Typecheck, Format
@@ -110,8 +129,18 @@ make fe-check
 
 **Python.**
 
+Using Make:
+
 ```bash
 make py-check
+```
+
+Using Hatch:
+
+```bash
+hatch run lint
+hatch run format
+hatch run typecheck:check
 ```
 
 ## Tests
@@ -139,10 +168,40 @@ make fe-test
 
 ### Python
 
-In the root directory, run
+Using Make:
 
 ```bash
 make py-test
+```
+
+#### Using Hatch
+
+**Run a specific tests.**
+
+```bash
+hatch run test:test tests/_ast/
+```
+
+**Run a specific test with optional dependencies.**
+
+```bash
+hatch run test-optional:test tests/_ast/
+```
+
+**Run tests with a specific Python version.**
+
+```bash
+hatch run +py=3.10 test:test tests/_ast/
+# or
+hatch run +py=3.10 test-optional:test tests/_ast/
+```
+
+**Run all tests across all Python versions.**
+
+Not recommended since it takes a long time.
+
+```bash
+hatch run test:test
 ```
 
 ### End-to-end
@@ -155,6 +214,8 @@ dependencies; follow those instructions.)
 
 For best practices on writing end-to-end tests, check out the [Best Practices
 doc](https://playwright.dev/docs/best-practices).
+
+For frontend tests, you want to build the frontend first with `make fe` so that Playwright works on your latest changes.
 
 **Run end-to-end tests.**
 
@@ -169,7 +230,7 @@ make e2e
 In `frontend/`:
 
 ```bash
-npx playwright test --ui
+pnpm playwright test --ui
 ```
 
 **Run a specific test.**
@@ -177,15 +238,15 @@ npx playwright test --ui
 In `frontend/`:
 
 ```bash
-npx playwright test <filename> --ui
+pnpm playwright test <filename> --ui
 # e.g.
-npx playwright test cells.test.ts --ui
+pnpm playwright test cells.test.ts --ui
 ```
 
 or
 
 ```bash
-npx playwright test --debug <filename>
+pnpm playwright test --debug <filename>
 ```
 
 ## Storybook
@@ -201,7 +262,7 @@ pnpm storybook
 
 You can develop on marimo with hot reloading on the frontend and/or development
 mode on the server (which automatically restarts the server on code changes).
-These modes especially helpful when you're making many small changes and
+These modes are especially helpful when you're making many small changes and
 want to see changes end-to-end very quickly.
 
 For the frontend, you can run either
@@ -252,7 +313,7 @@ marimo server. This means that:
 
 ## Editor settings
 
-If use use vscode, you might find the following `settings.json` useful:
+If you use vscode, you might find the following `settings.json` useful:
 
 ```json
 {

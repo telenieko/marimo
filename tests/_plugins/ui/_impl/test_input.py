@@ -1,7 +1,6 @@
 # Copyright 2024 Marimo. All rights reserved.
 from __future__ import annotations
 
-import datetime
 from typing import Any
 
 import pytest
@@ -10,6 +9,7 @@ from marimo._dependencies.dependencies import DependencyManager
 from marimo._plugins import ui
 
 HAS_PANDAS = DependencyManager.pandas.has()
+HAS_NUMPY = DependencyManager.numpy.has()
 
 
 def test_number_init() -> None:
@@ -36,19 +36,41 @@ def test_number_out_of_bounds() -> None:
     with pytest.raises(ValueError) as e:
         ui.number(1, 10, value=11)
 
-    assert "out of bounds" in str(e.value)
+    assert "must be less than or equal" in str(e.value)
 
     with pytest.raises(ValueError) as e:
         ui.number(1, 10, value=0)
 
-    assert "out of bounds" in str(e.value)
+    assert "must be greater than or equal" in str(e.value)
 
 
 def test_number_invalid_bounds() -> None:
     with pytest.raises(ValueError) as e:
         ui.number(1, 0)
 
-    assert "Invalid bounds" in str(e.value)
+    assert "must be less than or equal to" in str(e.value)
+
+
+def test_number_default_value() -> None:
+    # Test default value when not specified
+    number = ui.number(1, 10)
+    assert number.value == 1
+
+    # Test default value when only stop is specified
+    number = ui.number(stop=10)
+    assert number.value == 10
+
+    # Test default value when neither start nor stop is specified
+    number = ui.number()
+    assert number.value is None
+
+    # Test default value with step
+    number = ui.number(1, 10, step=2)
+    assert number.value == 1
+
+    # Test that explicitly set value overrides default
+    number = ui.number(1, 10, value=5)
+    assert number.value == 5
 
 
 @pytest.mark.skipif(not HAS_PANDAS, reason="pandas not installed")
@@ -56,11 +78,12 @@ def test_number_from_dataframe() -> None:
     import pandas as pd
 
     df = pd.DataFrame({"A": [1, 2, 3]})
-    number = ui.number.from_series(df["A"], step=0.1)
+    number = ui.number.from_series(df["A"], step=0.1, label="Custom label")
     assert number.start == 1
     assert number.stop == 3
     assert number.value == 1
     assert number.step == 0.1
+    assert number._args.label == "Custom label"
 
 
 def test_slider_init() -> None:
@@ -150,11 +173,12 @@ def test_slider_from_dataframe() -> None:
     import pandas as pd
 
     df = pd.DataFrame({"A": [1, 2, 3]})
-    slider = ui.slider.from_series(df["A"], step=0.1)
+    slider = ui.slider.from_series(df["A"], step=0.1, label="Custom label")
     assert slider.start == 1
     assert slider.stop == 3
     assert slider.value == 1
     assert slider.step == 0.1
+    assert slider._args.label == "Custom label"
 
 
 def test_range_slider_init() -> None:
@@ -247,11 +271,14 @@ def test_range_slider_from_dataframe() -> None:
     import pandas as pd
 
     df = pd.DataFrame({"A": [1, 2, 3]})
-    slider = ui.range_slider.from_series(df["A"], step=0.1)
+    slider = ui.range_slider.from_series(
+        df["A"], step=0.1, label="Custom label"
+    )
     assert slider.start == 1
     assert slider.stop == 3
     assert slider.value == [1, 3]
     assert slider.step == 0.1
+    assert slider._args.label == "Custom label"
 
 
 def test_text() -> None:
@@ -433,33 +460,88 @@ def test_form_in_dictionary_allowed() -> None:
     assert checkbox._id != d["form"].element._id
 
 
-# TODO(akshayka): test file
+def test_file_validation() -> None:
+    """Test file type validation in the file class."""
+    # Valid filetypes should be accepted
+    ui.file(filetypes=[".csv", ".txt"])
+    ui.file(filetypes=["audio/*"])
+    ui.file(filetypes=["video/*"])
+    ui.file(filetypes=["image/*"])
+    ui.file(filetypes=["application/json"])
+    ui.file(filetypes=["text/plain"])
+    ui.file(filetypes=[".csv", "application/json"])  # Mixed types are allowed
+    ui.file(filetypes=["text/html", "application/xml"])  # Multiple MIME types
+
+    # Invalid filetypes should raise ValueError
+    with pytest.raises(ValueError) as e:
+        ui.file(filetypes=["csv"])
+    assert "must start with a dot" in str(e.value)
+    assert "or contain a forward slash" in str(e.value)
+    assert "csv" in str(e.value)
+
+    with pytest.raises(ValueError) as e:
+        ui.file(filetypes=["txt", ".csv"])
+    assert "must start with a dot" in str(e.value)
+    assert "or contain a forward slash" in str(e.value)
+    assert "txt" in str(e.value)
+
+    with pytest.raises(ValueError) as e:
+        ui.file(filetypes=["doc", "pdf"])
+    assert "must start with a dot" in str(e.value)
+    assert "or contain a forward slash" in str(e.value)
+    assert "doc, pdf" in str(e.value)
 
 
-def test_date() -> None:
-    date = ui.date()
-    today = date.value
-    assert today == datetime.date.today()
+@pytest.mark.skipif(not HAS_NUMPY, reason="numpy not installed")
+def test_numpy_steps() -> None:
+    import numpy as np
 
-    date._update("2024-01-01")
-    assert date.value == datetime.date(2024, 1, 1)
+    steps = np.array([1, 2, 3, 4, 5])
+    slider = ui.slider(steps=steps)
+    assert slider.steps == [1, 2, 3, 4, 5]
+    assert slider.start == 1
+    assert slider.stop == 5
+    assert slider.step is None
 
-    date = ui.date(value="2024-01-01")
-    assert date.value == datetime.date(2024, 1, 1)
+    range_slider = ui.range_slider(steps=steps)
+    assert range_slider.steps == [1, 2, 3, 4, 5]
+    assert range_slider.start == 1
+    assert range_slider.stop == 5
+    assert range_slider.step is None
 
-    date = ui.date(value="2024-01-01")
-    date._update("2024-01-02")
-    assert date.value == datetime.date(2024, 1, 2)
+
+@pytest.mark.skipif(not HAS_NUMPY, reason="numpy not installed")
+def test_log_scale() -> None:
+    import numpy as np
+
+    steps = np.logspace(0, 3, 4)
+    slider = ui.slider(steps=steps)
+
+    assert slider.steps == [1, 10, 100, 1000]
+    assert slider.start == 1
+    assert slider.stop == 1000
+    assert slider.step is None
+
+    range_slider = ui.range_slider(steps=steps)
+    assert range_slider.steps == [1, 10, 100, 1000]
+    assert range_slider.start == 1
+    assert range_slider.stop == 1000
+    assert range_slider.step is None
 
 
-@pytest.mark.skipif(not HAS_PANDAS, reason="pandas not installed")
-def test_date_from_dataframe() -> None:
-    import pandas as pd
+@pytest.mark.skipif(not HAS_NUMPY, reason="numpy not installed")
+def test_power_scale() -> None:
+    import numpy as np
 
-    df = pd.DataFrame(
-        {"A": [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")]}
-    )
-    date = ui.date.from_series(df["A"], value=datetime.date(2024, 1, 2))
-    assert date.value == datetime.date(2024, 1, 2)
-    assert date.start == datetime.date(2024, 1, 1)
-    assert date.stop == datetime.date(2024, 1, 2)
+    steps = np.power([1, 2, 3], 2)
+    slider = ui.slider(steps=steps)
+    assert slider.steps == [1, 4, 9]
+    assert slider.start == 1
+    assert slider.stop == 9
+    assert slider.step is None
+
+    range_slider = ui.range_slider(steps=steps)
+    assert range_slider.steps == [1, 4, 9]
+    assert range_slider.start == 1
+    assert range_slider.stop == 9
+    assert range_slider.step is None

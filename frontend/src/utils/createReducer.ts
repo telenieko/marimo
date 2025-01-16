@@ -1,9 +1,10 @@
 /* Copyright 2024 Marimo. All rights reserved. */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { Logger } from "@/utils/Logger";
-import type { NoInfer } from "@tanstack/react-table";
 import { atom, useSetAtom } from "jotai";
 import type { Reducer } from "react";
+
+export type NoInfer<T> = [T][T extends any ? 0 : never];
 
 interface ReducerAction<T> {
   type: string;
@@ -16,7 +17,7 @@ type IfUnknown<T, Y, N> = unknown extends T ? Y : N;
 type ReducerHandler<State, Payload> = (state: State, payload: Payload) => State;
 
 interface ReducerHandlers<State> {
-  [K: string]: ReducerHandler<State, any>;
+  [k: string]: ReducerHandler<State, any>;
 }
 
 type ReducerActions<RH extends ReducerHandlers<any>> = {

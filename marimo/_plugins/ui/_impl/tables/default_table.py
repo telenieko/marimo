@@ -7,11 +7,12 @@ from typing import (
     List,
     Optional,
     Sequence,
+    Tuple,
     Union,
     cast,
 )
 
-from marimo._data.models import ColumnSummary
+from marimo._data.models import ColumnSummary, ExternalDataType
 from marimo._dependencies.dependencies import DependencyManager
 from marimo._output.mime import MIME
 from marimo._plugins.core.web_component import JSONType
@@ -26,11 +27,10 @@ from marimo._plugins.ui._impl.tables.pandas_table import (
 from marimo._plugins.ui._impl.tables.polars_table import (
     PolarsTableManagerFactory,
 )
-from marimo._plugins.ui._impl.tables.pyarrow_table import (
-    PyArrowTableManagerFactory,
-)
 from marimo._plugins.ui._impl.tables.table_manager import (
     ColumnName,
+    FieldType,
+    FieldTypes,
     TableManager,
 )
 
@@ -58,20 +58,29 @@ class DefaultTableManager(TableManager[JsonTableData]):
             or DependencyManager.pyarrow.has()
         )
 
-    def apply_formatting(self, format_mapping: FormatMapping) -> JsonTableData:
+    def apply_formatting(
+        self, format_mapping: Optional[FormatMapping]
+    ) -> TableManager[JsonTableData]:
+        if not format_mapping:
+            return self
+
         if isinstance(self.data, dict) and self.is_column_oriented:
-            return {
-                col: format_column(col, values, format_mapping)  # type: ignore
-                for col, values in self.data.items()
-            }
+            return DefaultTableManager(
+                {
+                    col: format_column(col, values, format_mapping)  # type: ignore
+                    for col, values in self.data.items()
+                }
+            )
         if isinstance(self.data, (list, tuple)) and all(
             isinstance(item, dict) for item in self.data
         ):
-            return [
-                format_row(row, format_mapping)  # type: ignore
-                for row in self.data
-            ]
-        return self.data
+            return DefaultTableManager(
+                [
+                    format_row(row, format_mapping)  # type: ignore
+                    for row in self.data
+                ]
+            )
+        return self
 
     def supports_filters(self) -> bool:
         return False
@@ -79,11 +88,7 @@ class DefaultTableManager(TableManager[JsonTableData]):
     def to_data(
         self, format_mapping: Optional[FormatMapping] = None
     ) -> JSONType:
-        return (
-            self._normalize_data(self.apply_formatting(format_mapping))
-            if format_mapping
-            else self._normalize_data(self.data)
-        )
+        return self._normalize_data(self.apply_formatting(format_mapping).data)
 
     def to_csv(self, format_mapping: Optional[FormatMapping] = None) -> bytes:
         if isinstance(self.data, dict) and not self.is_column_oriented:
@@ -187,6 +192,17 @@ class DefaultTableManager(TableManager[JsonTableData]):
     def get_row_headers(self) -> list[str]:
         return []
 
+    def get_field_type(
+        self, column_name: str
+    ) -> Tuple[FieldType, ExternalDataType]:
+        del column_name
+        return ("unknown", "object")
+
+    # By default, don't provide any field types
+    # so the frontend can infer them
+    def get_field_types(self) -> FieldTypes:
+        return []
+
     def _as_table_manager(self) -> TableManager[Any]:
         if DependencyManager.pandas.has():
             import pandas as pd
@@ -202,16 +218,6 @@ class DefaultTableManager(TableManager[JsonTableData]):
 
             return PolarsTableManagerFactory.create()(
                 pl.DataFrame(cast(Any, self.data))
-            )
-        if DependencyManager.pyarrow.has():
-            import pyarrow as pa
-
-            if isinstance(self.data, dict):
-                return PyArrowTableManagerFactory.create()(
-                    pa.Table.from_pydict(self.data)
-                )
-            return PyArrowTableManagerFactory.create()(
-                pa.Table.from_pylist(self._normalize_data(self.data))
             )
 
         raise ValueError("No supported table libraries found.")
@@ -243,6 +249,9 @@ class DefaultTableManager(TableManager[JsonTableData]):
         return sorted(
             self._as_table_manager().get_unique_column_values(column)
         )
+
+    def get_sample_values(self, column: str) -> list[Any]:
+        return self._as_table_manager().get_sample_values(column)
 
     def sort_values(
         self, by: ColumnName, descending: bool

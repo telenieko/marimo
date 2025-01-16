@@ -19,10 +19,16 @@ import { invariant } from "../../../utils/invariant";
 import type { OperationMessage } from "@/core/kernel/messages";
 import type { JsonString } from "@/utils/json/base64";
 import type { UserConfig } from "@/core/config/config-schema";
-import { getPyodideVersion, importPyodide } from "./getPyodideVersion";
+import { getPyodideVersion } from "./getPyodideVersion";
 import { t } from "./tracer";
 import { once } from "@/utils/once";
 import { getController } from "./getController";
+import type {
+  ListPackagesResponse,
+  PackageOperationResponse,
+  SaveNotebookRequest,
+} from "@/core/network/types";
+import { decodeUtf8 } from "@/utils/strings";
 
 /**
  * Web worker responsible for running the notebook.
@@ -40,9 +46,11 @@ async function loadPyodideAndPackages() {
   try {
     const marimoVersion = getMarimoVersion();
     const pyodideVersion = getPyodideVersion(marimoVersion);
-    await t.wrapAsync(importPyodide)(marimoVersion);
     const controller = await t.wrapAsync(getController)(marimoVersion);
     self.controller = controller;
+    rpc.send.initializingMessage({
+      message: "Loading marimo...",
+    });
     self.pyodide = await t.wrapAsync(controller.bootstrap.bind(controller))({
       version: marimoVersion,
       pyodideVersion: pyodideVersion,
@@ -55,7 +63,6 @@ async function loadPyodideAndPackages() {
   }
 }
 
-const pyodideReadyPromise = t.wrapAsync(loadPyodideAndPackages)();
 const messageBuffer = new MessageBuffer(
   (message: JsonString<OperationMessage>) => {
     rpc.send.kernelMessage({ message });
@@ -93,7 +100,13 @@ const requestHandler = createRPCRequestHandler({
         self.controller.startSession.bind(self.controller),
       );
       const initializeOnce = once(() => {
+        rpc.send.initializingMessage({
+          message: "Initializing notebook...",
+        });
         rpc.send.initialized({});
+      });
+      rpc.send.initializingMessage({
+        message: "Loading notebook and dependencies...",
       });
       const bridge = await startSession({
         code: opts.code,
@@ -143,7 +156,7 @@ const requestHandler = createRPCRequestHandler({
     const span = t.startSpan("readFile");
     await pyodideReadyPromise; // Make sure loading is done
 
-    const file = self.pyodide.FS.readFile(filename, { encoding: "utf8" });
+    const file = decodeUtf8(self.pyodide.FS.readFile(filename));
     span.end();
     return file;
   },
@@ -155,6 +168,80 @@ const requestHandler = createRPCRequestHandler({
     await pyodideReadyPromise; // Make sure loading is done
 
     self.pyodide.setInterruptBuffer(payload);
+  },
+
+  addPackage: async (opts: {
+    package: string;
+  }): Promise<PackageOperationResponse> => {
+    await pyodideReadyPromise; // Make sure loading is done
+
+    const { package: packageName } = opts;
+    const response = await self.pyodide.runPythonAsync(`
+      import micropip
+      import json
+      response = None
+      try:
+        await micropip.install("${packageName}")
+        response = {"success": True}
+      except Exception as e:
+        response = {"success": False, "error": str(e)}
+      json.dumps(response)
+    `);
+    return JSON.parse(response) as PackageOperationResponse;
+  },
+
+  removePackage: async (opts: {
+    package: string;
+  }): Promise<PackageOperationResponse> => {
+    await pyodideReadyPromise; // Make sure loading is done
+
+    const { package: packageName } = opts;
+    const response = await self.pyodide.runPythonAsync(`
+        import micropip
+        import json
+        response = None
+        try:
+          micropip.uninstall("${packageName}")
+          response = {"success": True}
+        except Exception as e:
+          response = {"success": False, "error": str(e)}
+        json.dumps(response)
+      `);
+    return JSON.parse(response) as PackageOperationResponse;
+  },
+
+  listPackages: async (): Promise<ListPackagesResponse> => {
+    const span = t.startSpan("listPackages");
+    await pyodideReadyPromise; // Make sure loading is done
+
+    const packages = await self.pyodide.runPythonAsync(`
+      import json
+      import micropip
+
+      packages = micropip.list()
+      packages = [
+        {"name": p.name, "version": p.version}
+        for p in packages.values()
+      ]
+      json.dumps(sorted(packages, key=lambda pkg: pkg["name"]))
+    `);
+    span.end();
+    return {
+      packages: JSON.parse(packages) as ListPackagesResponse["packages"],
+    };
+  },
+
+  /**
+   * Save the notebook
+   */
+  saveNotebook: async (opts: SaveNotebookRequest) => {
+    // Partially duplicated from save-worker.ts
+    await pyodideReadyPromise; // Make sure loading is done
+    const saveFile = self.pyodide.runPython(`
+      from marimo._pyodide.bootstrap import save_file
+      save_file
+    `);
+    await saveFile(JSON.stringify(opts), WasmFileSystem.NOTEBOOK_FILENAME);
   },
 
   /**
@@ -185,7 +272,7 @@ const requestHandler = createRPCRequestHandler({
         `);
     }
 
-    // Special case to lazily install pyaml on export_markdown
+    // Special case to lazily install PyYAML on export_markdown
     if (functionName === "export_markdown") {
       await self.pyodide.runPythonAsync(`
         import micropip
@@ -237,6 +324,8 @@ export type WorkerSchema = RPCSchema<
       kernelMessage: { message: JsonString<OperationMessage> };
       // Emitted when the Pyodide is initialized
       initialized: {};
+      // Emitted when the Pyodide is initializing, with new messages
+      initializingMessage: { message: string };
       // Emitted when the Pyodide fails to initialize
       initializedError: { error: string };
     };
@@ -273,3 +362,5 @@ const namesThatRequireSync = new Set<keyof RawBridge>([
 function getMarimoVersion() {
   return self.name; // We store the version in the worker name
 }
+
+const pyodideReadyPromise = t.wrapAsync(loadPyodideAndPackages)();

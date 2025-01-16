@@ -5,10 +5,12 @@ import json
 import unittest
 from typing import Any
 
+import narwhals.stable.v1 as nw
 import pytest
 
 from marimo._data.models import ColumnSummary
 from marimo._dependencies.dependencies import DependencyManager
+from marimo._plugins.ui._impl.tables.format import FormatMapping
 from marimo._plugins.ui._impl.tables.polars_table import (
     PolarsTableManagerFactory,
 )
@@ -18,6 +20,17 @@ from tests.mocks import snapshotter
 HAS_DEPS = DependencyManager.polars.has()
 
 snapshot = snapshotter(__file__)
+
+
+def assert_frame_equal(a: Any, b: Any) -> bool:
+    import polars.testing
+
+    if isinstance(a, nw.DataFrame):
+        a = a.to_native()
+    if isinstance(b, nw.DataFrame):
+        b = b.to_native()
+    polars.testing.assert_frame_equal(a, b)
+    return True
 
 
 @pytest.mark.skipif(not HAS_DEPS, reason="optional dependencies not installed")
@@ -36,25 +49,33 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
                     datetime.datetime(2021, 1, 2),
                     datetime.datetime(2021, 1, 3),
                 ],
+                "date": [
+                    datetime.date(2021, 1, 1),
+                    datetime.date(2021, 1, 2),
+                    datetime.date(2021, 1, 3),
+                ],
                 "struct": [
                     {"a": 1, "b": 2},
                     {"a": 3, "b": 4},
                     {"a": 5, "b": 6},
                 ],
-                "list": [[1, 2], [3, 4], [5, 6]],
-                "array": [[1, 2, 3], [4], []],
-                "nulls": [None, "data", None],
-                "categorical": pl.Series(["cat", "dog", "mouse"]).cast(
-                    pl.Categorical
+                "list": pl.Series(
+                    [[1, 2], [3, 4], [5, 6]], dtype=pl.List(pl.Int64)
                 ),
-                # raises:
-                #   pyo3_runtime.PanicException:
-                #   not yet implemented: Writing Time64(Nanosecond) to JSON
-                # "time": [
-                #     datetime.time(12, 30),
-                #     datetime.time(13, 45),
-                #     datetime.time(14, 15),
-                # ],
+                "array": pl.Series(
+                    [[1], [2], [3]], dtype=pl.Array(pl.Int64, 1)
+                ),
+                "nulls": pl.Series([None, "data", None]),
+                "category": pl.Series(
+                    ["cat", "dog", "mouse"], dtype=pl.Categorical
+                ),
+                "set": [set([1, 2]), set([3, 4]), set([5, 6])],
+                "imaginary": [1 + 2j, 3 + 4j, 5 + 6j],
+                "time": [
+                    datetime.time(12, 30),
+                    datetime.time(13, 45),
+                    datetime.time(14, 15),
+                ],
                 "duration": [
                     datetime.timedelta(days=1),
                     datetime.timedelta(days=2),
@@ -101,6 +122,7 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
     def test_to_csv(self) -> None:
         assert isinstance(self.manager.to_csv(), bytes)
 
+    def test_to_csv_complex(self) -> None:
         complex_data = self.get_complex_data()
         data = complex_data.to_csv()
         assert isinstance(data, bytes)
@@ -120,8 +142,21 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
     def test_to_json(self) -> None:
         assert isinstance(self.manager.to_json(), bytes)
 
+    def test_to_json_complex(self) -> None:
         complex_data = self.get_complex_data()
-        data = complex_data.to_json()
+        # pl.Time and pl.Object are not supported in JSON
+        other_columns = [
+            col
+            for col in complex_data.get_column_names()
+            if col
+            not in [
+                "time",
+                "set",
+                "imaginary",
+            ]
+        ]
+        manager = complex_data.select_columns(other_columns)
+        data = manager.to_json()
         assert isinstance(data, bytes)
         snapshot("polars.json", data.decode("utf-8"))
 
@@ -133,8 +168,9 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
     def test_select_rows(self) -> None:
         indices = [0, 2]
         selected_manager = self.manager.select_rows(indices)
+        assert "PolarsTableManager" in str(type(selected_manager))
         expected_data = self.data[indices]
-        assert selected_manager.data.equals(expected_data)
+        assert assert_frame_equal(selected_manager.data, expected_data)
 
     def test_select_rows_empty(self) -> None:
         selected_manager = self.manager.select_rows([])
@@ -144,8 +180,9 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
     def test_select_columns(self) -> None:
         columns = ["A"]
         selected_manager = self.manager.select_columns(columns)
+        assert "PolarsTableManager" in str(type(selected_manager))
         expected_data = self.data.select(columns)
-        assert selected_manager.data.equals(expected_data)
+        assert assert_frame_equal(selected_manager.data, expected_data)
 
     def test_get_row_headers(self) -> None:
         expected_headers = []
@@ -158,13 +195,13 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
     def test_get_field_types(self) -> None:
         import polars as pl
 
-        expected_field_types = {
-            "A": ("integer", "i64"),
-            "B": ("string", "str"),
-            "C": ("number", "f64"),
-            "D": ("boolean", "bool"),
-            "E": ("date", "datetime[μs]"),
-        }
+        expected_field_types = [
+            ("A", ("integer", "i64")),
+            ("B", ("string", "str")),
+            ("C", ("number", "f64")),
+            ("D", ("boolean", "bool")),
+            ("E", ("datetime", "datetime[μs]")),
+        ]
         assert self.manager.get_field_types() == expected_field_types
 
         complex_data = pl.DataFrame(
@@ -191,20 +228,32 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
                     "5-10",
                     "10-15",
                 ],
+                "K": [
+                    datetime.date(2021, 1, 1),
+                    datetime.date(2021, 1, 2),
+                    datetime.date(2021, 1, 3),
+                ],
+                "L": [
+                    datetime.time(1, 2, 3),
+                    datetime.time(4, 5, 6),
+                    datetime.time(7, 8, 9),
+                ],
             }
         )
-        expected_field_types = {
-            "A": ("integer", "i64"),
-            "B": ("string", "str"),
-            "C": ("number", "f64"),
-            "D": ("boolean", "bool"),
-            "E": ("unknown", "object"),
-            "F": ("unknown", "null"),
-            "G": ("unknown", "object"),
-            "H": ("date", "datetime[μs]"),
-            "I": ("string", "str"),
-            "J": ("string", "str"),
-        }
+        expected_field_types = [
+            ("A", ("integer", "i64")),
+            ("B", ("string", "str")),
+            ("C", ("number", "f64")),
+            ("D", ("boolean", "bool")),
+            ("E", ("unknown", "object")),
+            ("F", ("unknown", "null")),
+            ("G", ("unknown", "object")),
+            ("H", ("datetime", "datetime[μs]")),
+            ("I", ("string", "str")),
+            ("J", ("string", "str")),
+            ("K", ("date", "date")),
+            ("L", ("time", "Time")),
+        ]
         assert (
             self.factory.create()(complex_data).get_field_types()
             == expected_field_types
@@ -213,7 +262,34 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
     def test_limit(self) -> None:
         limited_manager = self.manager.take(1, 0)
         expected_data = self.data.head(1)
-        assert limited_manager.data.equals(expected_data)
+        assert "PolarsTableManager" in str(type(limited_manager))
+        assert assert_frame_equal(limited_manager.data, expected_data)
+
+    def test_take(self) -> None:
+        assert self.manager.take(1, 0).data["A"].to_list() == [1]
+        assert self.manager.take(2, 0).data["A"].to_list() == [1, 2]
+        assert self.manager.take(2, 1).data["A"].to_list() == [2, 3]
+        assert self.manager.take(2, 2).data["A"].to_list() == [3]
+
+    def test_take_zero(self) -> None:
+        limited_manager = self.manager.take(0, 0)
+        assert limited_manager.data.is_empty()
+
+    def test_take_negative(self) -> None:
+        with pytest.raises(ValueError):
+            self.manager.take(-1, 0)
+
+    def test_take_negative_offset(self) -> None:
+        with pytest.raises(ValueError):
+            self.manager.take(1, -1)
+
+    def test_take_out_of_bounds(self) -> None:
+        # Too large of page
+        assert len(self.manager.take(10, 0).data) == 3
+        assert len(self.data) == 3
+
+        # Too large of page and offset
+        assert self.manager.take(10, 10).data.is_empty()
 
     def test_summary_integer(self) -> None:
         column = "A"
@@ -269,7 +345,7 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
             false=1,
         )
 
-    def test_summary_date(self) -> None:
+    def test_summary_datetime(self) -> None:
         column = "E"
         summary = self.manager.get_summary(column)
         assert summary == ColumnSummary(
@@ -278,18 +354,52 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
             min=datetime.datetime(2021, 1, 1, 0, 0),
             max=datetime.datetime(2021, 1, 3, 0, 0),
             mean=datetime.datetime(2021, 1, 2, 0, 0),
-            median=datetime.datetime(2021, 1, 2, 0, 0),
+            # TODO: narwhals doesn't support median
+            # and polars doesn't support quantiles for dates
+            # median=datetime.datetime(2021, 1, 2, 0, 0),
         )
+
+    def test_summary_date(self) -> None:
+        import polars as pl
+
+        data = pl.DataFrame(
+            {
+                "A": [datetime.date(2021, 1, 1), datetime.date(2021, 1, 2)],
+            }
+        )
+        manager = self.factory.create()(data)
+        summary = manager.get_summary("A")
+        assert summary == ColumnSummary(
+            total=2,
+            nulls=0,
+            min=datetime.date(2021, 1, 1),
+            max=datetime.date(2021, 1, 2),
+            mean=datetime.datetime(2021, 1, 1, 12, 0),
+            # TODO: narwhals doesn't support median
+            # and polars doesn't support quantiles for dates
+            # median=datetime.datetime(2021, 1, 1, 12, 0),
+        )
+
+    def test_summary_does_fail_on_each_column(self) -> None:
+        complex_data = self.get_complex_data()
+        for column in complex_data.get_column_names():
+            assert complex_data.get_summary(column) is not None
 
     def test_sort_values(self) -> None:
         sorted_df = self.manager.sort_values("A", descending=True).data
         expected_df = self.data.sort("A", descending=True)
-        assert sorted_df.equals(expected_df)
+        assert assert_frame_equal(sorted_df, expected_df)
 
     def test_get_unique_column_values(self) -> None:
         column = "A"
         unique_values = self.manager.get_unique_column_values(column)
         assert unique_values == [1, 2, 3]
+
+    def test_get_sample_values(self) -> None:
+        sample_values = self.manager.get_sample_values("A")
+        assert sample_values == [1, 2, 3]
+        sample_values = self.manager.get_sample_values("B")
+        assert sample_values == ["a", "b", "c"]
 
     def test_search(self) -> None:
         import polars as pl
@@ -299,30 +409,42 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
                 "A": [1, 2, 3],
                 "B": ["foo", "bar", "baz"],
                 "C": [True, False, True],
+                "D": [["zz", "yyy"], [], []],
+                "E": [1.1, 2.2, 3.3],
+                "G": ["U", "T", "V"],
             }
         )
         manager = self.factory.create()(df)
+        # Exact match
         assert manager.search("foo").get_num_rows() == 1
+        # Contains
         assert manager.search("a").get_num_rows() == 2
+        # Case insensitive
+        assert manager.search("v").get_num_rows() == 1
+        assert manager.search("V").get_num_rows() == 1
+        # Case insensitive / boolean
         assert manager.search("true").get_num_rows() == 2
+        # Overmatch
         assert manager.search("food").get_num_rows() == 0
+        # Int (exact match)
+        assert manager.search("1").get_num_rows() == 1
+        # Float (exact match)
+        assert manager.search("1.1").get_num_rows() == 1
+        # List (exact match)
+        assert manager.search("yyy").get_num_rows() == 1
+        assert manager.search("y").get_num_rows() == 0
 
     def test_apply_formatting_does_not_modify_original_data(self) -> None:
-        from polars.testing import assert_frame_equal
-
         original_data = self.data.clone()
         format_mapping = {
             "A": lambda x: x * 2,
             "B": lambda x: x.upper(),
         }
-        self.manager.apply_formatting(format_mapping)
+        assert self.manager.apply_formatting(format_mapping).data is not None
         assert_frame_equal(self.manager.data, original_data)
 
     def test_apply_formatting(self) -> None:
         import polars as pl
-        from polars.testing import assert_frame_equal
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
 
         format_mapping: FormatMapping = {
             "A": lambda x: x * 2,
@@ -332,7 +454,7 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
             "E": lambda x: x.strftime("%Y-%m-%d"),
         }
 
-        formatted_data = self.manager.apply_formatting(format_mapping)
+        formatted_data = self.manager.apply_formatting(format_mapping).data
         expected_data = pl.DataFrame(
             {
                 "A": [2, 4, 6],
@@ -346,31 +468,25 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
 
     def test_apply_formatting_with_empty_dataframe(self) -> None:
         import polars as pl
-        from polars.testing import assert_frame_equal
 
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
-
-        empty_data = pl.DataFrame()
+        empty_data = pl.DataFrame({"A": []})
         manager = self.factory.create()(empty_data)
 
         format_mapping: FormatMapping = {
             "A": lambda x: x * 2,
         }
 
-        formatted_data = manager.apply_formatting(format_mapping)
+        formatted_data = manager.apply_formatting(format_mapping).data
         assert_frame_equal(formatted_data, empty_data)
 
     def test_apply_formatting_partial(self) -> None:
         import polars as pl
-        from polars.testing import assert_frame_equal
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
 
         format_mapping: FormatMapping = {
             "A": lambda x: x * 2,
         }
 
-        formatted_data = self.manager.apply_formatting(format_mapping)
+        formatted_data = self.manager.apply_formatting(format_mapping).data
         expected_data = pl.DataFrame(
             {
                 "A": [2, 4, 6],
@@ -387,32 +503,21 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
         assert_frame_equal(formatted_data, expected_data)
 
     def test_apply_formatting_empty(self) -> None:
-        from polars.testing import assert_frame_equal
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
-
         format_mapping: FormatMapping = {}
 
-        formatted_data = self.manager.apply_formatting(format_mapping)
+        formatted_data = self.manager.apply_formatting(format_mapping).data
         assert_frame_equal(formatted_data, self.data)
 
     def test_apply_formatting_invalid_column(self) -> None:
-        from polars.testing import assert_frame_equal
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
-
         format_mapping: FormatMapping = {
             "Z": lambda x: x * 2,
         }
 
-        formatted_data = self.manager.apply_formatting(format_mapping)
+        formatted_data = self.manager.apply_formatting(format_mapping).data
         assert_frame_equal(formatted_data, self.data)
 
     def test_apply_formatting_with_nan(self) -> None:
         import polars as pl
-        from polars.testing import assert_frame_equal
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
 
         data_with_nan = self.data.clone()
         data_with_nan = data_with_nan.with_columns(
@@ -427,7 +532,7 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
             "A": lambda x: x * 2 if x is not None else x,
         }
 
-        formatted_data = manager_with_nan.apply_formatting(format_mapping)
+        formatted_data = manager_with_nan.apply_formatting(format_mapping).data
         expected_data = data_with_nan.clone()
         expected_data = expected_data.with_columns(
             pl.when(pl.col("A").is_not_null())
@@ -439,16 +544,13 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
 
     def test_apply_formatting_with_multi_index(self) -> None:
         import polars as pl
-        from polars.testing import assert_frame_equal
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
 
         data = pl.DataFrame(
             {
                 "A": [1, 2, 3],
                 "B": ["a", "b", "c"],
             }
-        ).with_row_count("index")
+        ).with_row_index()
         data = data.with_columns(pl.col("index").cast(pl.Utf8))
 
         manager = self.factory.create()(data)
@@ -458,7 +560,7 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
             "B": lambda x: x.upper(),
         }
 
-        formatted_data = manager.apply_formatting(format_mapping)
+        formatted_data = manager.apply_formatting(format_mapping).data
         expected_data = pl.DataFrame(
             {
                 "index": ["0", "1", "2"],
@@ -470,9 +572,6 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
 
     def test_apply_formatting_with_categorical_data(self) -> None:
         import polars as pl
-        from polars.testing import assert_frame_equal
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
 
         data = pl.DataFrame(
             {
@@ -487,7 +586,7 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
             "B": lambda x: x * 2,
         }
 
-        formatted_data = manager.apply_formatting(format_mapping)
+        formatted_data = manager.apply_formatting(format_mapping).data
         expected_data = pl.DataFrame(
             {
                 "A": pl.Series(["A", "B", "A"]),
@@ -498,9 +597,6 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
 
     def test_apply_formatting_with_datetime_index(self) -> None:
         import polars as pl
-        from polars.testing import assert_frame_equal
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
 
         data = pl.DataFrame(
             {
@@ -523,7 +619,7 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
             "B": lambda x: x.upper(),
         }
 
-        formatted_data = manager.apply_formatting(format_mapping)
+        formatted_data = manager.apply_formatting(format_mapping).data
         expected_data = pl.DataFrame(
             {
                 "A": [2, 4, 6],
@@ -535,9 +631,6 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
 
     def test_apply_formatting_with_complex_data(self) -> None:
         import polars as pl
-        from polars.testing import assert_frame_equal
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
 
         data = pl.DataFrame(
             {
@@ -565,7 +658,7 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
             "G": abs,
         }
 
-        formatted_data = manager.apply_formatting(format_mapping)
+        formatted_data = manager.apply_formatting(format_mapping).data
         expected_data = pl.DataFrame(
             {
                 "A": [2, 4, 6],
@@ -582,3 +675,117 @@ class TestPolarsTableManagerFactory(unittest.TestCase):
             }
         )
         assert_frame_equal(formatted_data, expected_data)
+
+    def test_apply_formatting_with_none_values(self) -> None:
+        import polars as pl
+
+        # Create test data with None values in different types of columns
+        data = pl.DataFrame(
+            {
+                "strings": ["a", None, "c"],
+                "integers": [1, None, 3],
+                "floats": [1.5, None, 3.5],
+                "booleans": [True, None, False],
+                "dates": [
+                    datetime.date(2021, 1, 1),
+                    None,
+                    datetime.date(2021, 1, 3),
+                ],
+                "lists": [[1, 2], None, [5, 6]],
+            },
+        )
+        manager = self.factory.create()(data)
+
+        format_mapping: FormatMapping = {
+            "strings": lambda x: "MISSING" if x is None else x.upper(),
+            "integers": lambda x: -100 if x is None else x * 2,
+            "floats": lambda x: "---" if x is None else f"{x:.1f}",
+            "booleans": lambda x: "MISSING" if x is None else str(x).upper(),
+            "dates": lambda x: "No Date"
+            if x is None
+            else x.strftime("%Y-%m-%d"),
+            "lists": lambda x: "Empty" if x is None else f"List({len(x)})",
+        }
+
+        formatted_data = manager.apply_formatting(format_mapping).data
+        expected_data = pl.DataFrame(
+            {
+                "strings": ["A", "MISSING", "C"],
+                "integers": [2, -100, 6],
+                "floats": ["1.5", "---", "3.5"],
+                "booleans": ["TRUE", "MISSING", "FALSE"],
+                "dates": ["2021-01-01", "No Date", "2021-01-03"],
+                "lists": ["List(2)", "Empty", "List(2)"],
+            }
+        )
+        assert_frame_equal(formatted_data, expected_data)
+
+    def test_empty_dataframe(self) -> None:
+        import polars as pl
+
+        empty_df = pl.DataFrame()
+        empty_manager = self.factory.create()(empty_df)
+        assert empty_manager.get_num_rows() == 0
+        assert empty_manager.get_num_columns() == 0
+        assert empty_manager.get_column_names() == []
+        assert empty_manager.get_field_types() == []
+
+    def test_dataframe_with_all_null_column(self) -> None:
+        import polars as pl
+
+        df = pl.DataFrame({"A": [1, 2, 3], "B": [None, None, None]})
+        manager = self.factory.create()(df)
+        summary = manager.get_summary("B")
+        assert summary.nulls == 3
+        assert summary.total == 3
+
+    def test_dataframe_with_mixed_types(self) -> None:
+        import polars as pl
+
+        df = pl.DataFrame({"A": [1, "two", 3.0, True]}, strict=False)
+        manager = self.factory.create()(df)
+        assert manager.get_field_type("A") == ("string", "str")
+
+    def test_search_with_regex(self) -> None:
+        import polars as pl
+
+        df = pl.DataFrame({"A": ["apple", "banana", "cherry"]})
+        manager = self.factory.create()(df)
+        result = manager.search("^[ab]")
+        assert result.get_num_rows() == 2
+
+    def test_sort_values_with_nulls(self) -> None:
+        import polars as pl
+
+        df = pl.DataFrame({"A": [3, 1, None, 2]})
+        manager = self.factory.create()(df)
+        sorted_manager = manager.sort_values("A", descending=True)
+        assert sorted_manager.data["A"].to_list() == [None, 3, 2, 1]
+
+    def test_get_field_types_with_datetime(self):
+        import polars as pl
+
+        data = pl.DataFrame(
+            {
+                "date_col": [
+                    datetime.date(2021, 1, 1),
+                    datetime.date(2021, 1, 3),
+                ],
+                "datetime_col": [
+                    datetime.datetime(2021, 1, 1),
+                    datetime.datetime(2021, 1, 3),
+                ],
+                "time_col": [
+                    datetime.time(1, 2, 3),
+                    datetime.time(4, 5, 6),
+                ],
+            }
+        )
+        manager = self.factory.create()(data)
+
+        assert manager.get_field_type("date_col") == ("date", "date")
+        assert manager.get_field_type("datetime_col") == (
+            "datetime",
+            "datetime[μs]",
+        )
+        assert manager.get_field_type("time_col") == ("time", "Time")

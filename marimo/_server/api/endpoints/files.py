@@ -13,8 +13,10 @@ from marimo._ast import codegen
 from marimo._server.api.deps import AppState
 from marimo._server.api.status import HTTPStatus
 from marimo._server.api.utils import parse_request
+from marimo._server.ids import ConsumerId
 from marimo._server.models.models import (
     BaseResponse,
+    CopyNotebookRequest,
     OpenFileRequest,
     ReadCodeResponse,
     RenameFileRequest,
@@ -98,8 +100,15 @@ async def rename_file(
         app_state.session_manager.recents.touch(new_path)
 
     app_state.require_current_session().put_control_request(
-        body.as_execution_request()
+        body.as_execution_request(),
+        from_consumer_id=ConsumerId(app_state.require_current_session_id()),
     )
+
+    if new_path:
+        # Handle rename for watch
+        app_state.session_manager.handle_file_rename_for_watch(
+            app_state.require_current_session_id(), new_path
+        )
 
     return SuccessResponse()
 
@@ -178,6 +187,34 @@ async def save(
     body = await parse_request(request, cls=SaveNotebookRequest)
     session = app_state.require_current_session()
     contents = session.app_file_manager.save(body)
+
+    return PlainTextResponse(content=contents)
+
+
+@router.post("/copy")
+@requires("edit")
+async def copy(
+    *,
+    request: Request,
+) -> PlainTextResponse:
+    """
+    requestBody:
+        content:
+            application/json:
+                schema:
+                    $ref: "#/components/schemas/CopyNotebookRequest"
+    responses:
+        200:
+            description: Copy notebook
+            content:
+                text/plain:
+                    schema:
+                        type: string
+    """
+    app_state = AppState(request)
+    body = await parse_request(request, cls=CopyNotebookRequest)
+    session = app_state.require_current_session()
+    contents = session.app_file_manager.copy(body)
 
     return PlainTextResponse(content=contents)
 

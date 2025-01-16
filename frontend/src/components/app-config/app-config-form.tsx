@@ -13,15 +13,18 @@ import {
 import {
   type AppConfig,
   AppConfigSchema,
-  APP_WIDTHS,
   AppTitleSchema,
 } from "../../core/config/config-schema";
+import { getAppWidths } from "@/core/config/widths";
 import { Input } from "../ui/input";
 import { NativeSelect } from "../ui/native-select";
 import { useAppConfig } from "@/core/config/config";
 import { saveAppConfig } from "@/core/network/requests";
 import { SettingTitle, SettingDescription } from "./common";
 import { useEffect } from "react";
+import { Checkbox } from "../ui/checkbox";
+import { arrayToggle } from "@/utils/arrays";
+import { Kbd } from "../ui/kbd";
 
 export const AppConfigForm: React.FC = () => {
   const [config, setConfig] = useAppConfig();
@@ -75,7 +78,7 @@ export const AppConfigForm: React.FC = () => {
                   disabled={field.disabled}
                   className="inline-flex mr-2"
                 >
-                  {APP_WIDTHS.map((option) => (
+                  {getAppWidths().map((option) => (
                     <option value={option} key={option}>
                       {option}
                     </option>
@@ -139,6 +142,94 @@ export const AppConfigForm: React.FC = () => {
               <FormDescription>
                 A filepath to a custom css file to be injected into the
                 notebook.
+              </FormDescription>
+            </div>
+          )}
+        />
+        <FormField
+          control={form.control}
+          name="html_head_file"
+          render={({ field }) => (
+            <div className="flex flex-col gap-y-1">
+              <FormItem className="flex flex-row items-center space-x-1 space-y-0">
+                <FormLabel className="flex-shrink-0">HTML Head</FormLabel>
+                <FormControl>
+                  <Input
+                    {...field}
+                    value={field.value ?? ""}
+                    placeholder="head.html"
+                    onChange={(e) => {
+                      field.onChange(e.target.value);
+                    }}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+              <FormDescription>
+                A filepath to an HTML file to be injected into the{" "}
+                <Kbd className="inline">{"<head/>"}</Kbd> section of the
+                notebook. Use this to add analytics, custom fonts, meta tags, or
+                external scripts.
+              </FormDescription>
+            </div>
+          )}
+        />
+        <FormField
+          control={form.control}
+          name="auto_download"
+          render={({ field }) => (
+            <div className="flex flex-col gap-y-1">
+              <div className="text-base font-bold text-muted-foreground">
+                Auto-download
+              </div>
+              <FormItem className="flex flex-col gap-2">
+                <FormControl>
+                  <div className="flex gap-4">
+                    <div className="flex items-center space-x-2">
+                      <Checkbox
+                        id="html-checkbox"
+                        checked={field.value.includes("html")}
+                        onCheckedChange={() => {
+                          field.onChange(arrayToggle(field.value, "html"));
+                        }}
+                      />
+                      <FormLabel htmlFor="html-checkbox">HTML</FormLabel>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      <Checkbox
+                        id="ipynb-checkbox"
+                        checked={field.value.includes("ipynb")}
+                        onCheckedChange={() => {
+                          field.onChange(arrayToggle(field.value, "ipynb"));
+                        }}
+                      />
+                      <FormLabel htmlFor="ipynb-checkbox">IPYNB</FormLabel>
+                    </div>
+                    {/* Disable markdown until we save outputs in the exported markdown */}
+                    {/* <div className="flex items-center space-x-2">
+                      <Checkbox
+                        id="markdown-checkbox"
+                        checked={field.value.includes("markdown")}
+                        onCheckedChange={() => {
+                          field.onChange(arrayToggle(field.value, "markdown"));
+                        }}
+                      />
+                      <label
+                        htmlFor="markdown-checkbox"
+                        className="cursor-pointer"
+                      >
+                        Markdown
+                      </label>
+                    </div> */}
+                  </div>
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+              <FormDescription>
+                When enabled, marimo will periodically save this notebook in
+                your selected formats (HTML, IPYNB) to a folder named{" "}
+                <Kbd className="inline">__marimo__</Kbd> next to your notebook
+                file.
               </FormDescription>
             </div>
           )}

@@ -1,6 +1,6 @@
 /* Copyright 2024 Marimo. All rights reserved. */
 import { defineConfig, type Plugin } from "vite";
-import react from "@vitejs/plugin-react-swc";
+import react from "@vitejs/plugin-react";
 import tsconfigPaths from "vite-tsconfig-paths";
 import { JSDOM } from "jsdom";
 
@@ -18,6 +18,14 @@ const htmlDevPlugin = (): Plugin => {
     transformIndexHtml: async (html, ctx) => {
       if (isStorybook) {
         return html;
+      }
+
+      // Add react-scan in dev mode
+      if (isDev) {
+        html = html.replace(
+          "<head>",
+          '<head>\n<script src="https://unpkg.com/react-scan/dist/auto.global.js"></script>',
+        );
       }
 
       if (isPyodide) {
@@ -51,8 +59,54 @@ const htmlDevPlugin = (): Plugin => {
       }
 
       // fetch html from server
-      const serverHtmlResponse = await fetch(TARGET + ctx.originalUrl);
-      const serverHtml = await serverHtmlResponse.text();
+      let serverHtml: string;
+      try {
+        const serverHtmlResponse = await fetch(TARGET + ctx.originalUrl);
+        if (!serverHtmlResponse.ok) {
+          throw new Error("Failed to fetch");
+        }
+        serverHtml = await serverHtmlResponse.text();
+      } catch (e) {
+        console.error(
+          `Failed to connect to a marimo server at ${TARGET + ctx.originalUrl}`,
+        );
+        console.log(`
+A marimo server may not be running.
+Run \x1b[32mmarimo edit --no-token --headless\x1b[0m in another terminal to start the server.
+
+If the server is already running, make sure it is using port ${SERVER_PORT} with \x1b[1m--port=${SERVER_PORT}\x1b[0m.
+        `);
+        return `
+        <html>
+          <body style="padding: 2rem; font-family: system-ui, sans-serif; line-height: 1.5;">
+            <div style="max-width: 500px; margin: 0 auto;">
+              <h2 style="color: #e53e3e">Server Connection Error</h2>
+
+              <p>
+                Could not connect to marimo server at:<br/>
+                <code style="background: #f7f7f7; padding: 0.2rem 0.4rem; border-radius: 4px;">
+                  ${TARGET + ctx.originalUrl}
+                </code>
+              </p>
+
+              <div style="background: #f7f7f7; padding: 1.5rem; border-radius: 8px;">
+                <div>To start the server, run:</div>
+                <code style="color: #32CD32; font-weight: 600;">
+                  marimo edit --no-token --headless
+                </code>
+              </div>
+
+              <p>
+                If the server is already running, make sure it is using port
+                <code style="font-weight: 600;">${SERVER_PORT}</code>
+                with the flag
+                <code style="font-weight: 600;">--port=${SERVER_PORT}</code>
+              </p>
+            </div>
+          </body>
+        </html>
+        `;
+      }
 
       const serverDoc = new JSDOM(serverHtml).window.document;
       const devDoc = new JSDOM(html).window.document;
@@ -61,8 +115,20 @@ const htmlDevPlugin = (): Plugin => {
       if (!serverHtml.includes("marimo-mode") && serverHtml.includes("login")) {
         return `
         <html>
-          <body>
-          In development mode, please run the server without authentication: <code style="color: red;">marimo edit --no-token</code>
+          <body style="padding: 2rem; font-family: system-ui, sans-serif; line-height: 1.5;">
+            <div style="max-width: 500px; margin: 0 auto;">
+              <h2 style="color: #e53e3e">Authentication Not Supported</h2>
+
+              <p>
+                In development mode, please run the server without authentication:
+              </p>
+
+              <div style="background: #f7f7f7; padding: 1.5rem; border-radius: 8px;">
+                <code style="color: #32CD32; font-weight: 600;">
+                  marimo edit --no-token
+                </code>
+              </div>
+            </div>
           </body>
         </html>
         `;
@@ -70,7 +136,6 @@ const htmlDevPlugin = (): Plugin => {
 
       // copies these elements from server to dev
       const copyElements = [
-        "base",
         "title",
         "marimo-filename",
         "marimo-version",
@@ -105,6 +170,10 @@ const htmlDevPlugin = (): Plugin => {
   };
 };
 
+const ReactCompilerConfig = {
+  target: "18",
+};
+
 // https://vitejs.dev/config/
 export default defineConfig({
   // This allows for a dynamic <base> tag in index.html
@@ -130,6 +199,14 @@ export default defineConfig({
         changeOrigin: true,
       },
       "/ws": {
+        target: `ws://${HOST}:${SERVER_PORT}`,
+        ws: true,
+        changeOrigin: true,
+        headers: {
+          origin: TARGET,
+        },
+      },
+      "/lsp": {
         target: `ws://${HOST}:${SERVER_PORT}`,
         ws: true,
         changeOrigin: true,
@@ -166,19 +243,22 @@ export default defineConfig({
     dedupe: ["react", "react-dom", "@emotion/react", "@emotion/cache"],
   },
   worker: {
+    format: "es",
     plugins: () => [tsconfigPaths()],
   },
   plugins: [
     htmlDevPlugin(),
     react({
-      tsDecorators: true,
-      plugins: isDev
-        ? [
-            // Fails on latest Vite
-            // ["@swc-jotai/react-refresh", {}]
-          ]
-        : undefined,
+      babel: {
+        presets: ["@babel/preset-typescript"],
+        plugins: [
+          ["@babel/plugin-proposal-decorators", { legacy: true }],
+          ["@babel/plugin-proposal-class-properties", { loose: true }],
+          ["babel-plugin-react-compiler", ReactCompilerConfig],
+        ],
+      },
     }),
+
     tsconfigPaths(),
   ],
 });

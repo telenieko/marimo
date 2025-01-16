@@ -8,6 +8,7 @@ import { isOutputEmpty } from "@/core/cells/outputs";
 import type { CellRuntimeState } from "@/core/cells/types";
 import { sendRun } from "@/core/network/requests";
 import { useEventListener } from "@/hooks/useEventListener";
+import { copyToClipboard } from "@/utils/copy";
 import { Logger } from "@/utils/Logger";
 import { useAtomValue } from "jotai";
 import { selectAtom } from "jotai/utils";
@@ -28,7 +29,7 @@ interface IconButtonProps {
 }
 
 const IconButton: React.FC<IconButtonProps> = ({ tooltip, icon, action }) => (
-  <Tooltip content={tooltip}>
+  <Tooltip content={tooltip} delayDuration={200}>
     <Button
       size="icon"
       variant="outline"
@@ -81,9 +82,12 @@ export const MarimoOutputWrapper: React.FC<Props> = ({
       }
     }),
   );
+  // Set pressed to false if the window loses focus
+  useEventListener(window, "blur", () => setPressed(false));
+  useEventListener(window, "mouseleave", () => setPressed(false));
 
   if (!runtime?.output) {
-    return children;
+    return <div className="relative min-h-6 empty:hidden">{children}</div>;
   }
 
   // No output to display
@@ -104,7 +108,7 @@ export const MarimoOutputWrapper: React.FC<Props> = ({
         <IconButton
           tooltip="Copy code"
           icon={<CopyIcon className="size-3" />}
-          action={() => navigator.clipboard.writeText(codeCallback())}
+          action={() => copyToClipboard(codeCallback())}
         />
         <IconButton
           tooltip="Re-run cell"

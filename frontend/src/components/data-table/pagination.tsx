@@ -1,4 +1,6 @@
 /* Copyright 2024 Marimo. All rights reserved. */
+"use no memo";
+
 import type { Table } from "@tanstack/react-table";
 import {
   ChevronLeft,
@@ -9,15 +11,20 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { PluralWord } from "@/utils/pluralize";
+import { range } from "lodash-es";
 
 interface DataTablePaginationProps<TData> {
   table: Table<TData>;
+  selection?: "single" | "multi" | null;
+  totalColumns: number;
   onSelectAllRowsChange?: (value: boolean) => void;
 }
 
 export const DataTablePagination = <TData,>({
   table,
+  selection,
   onSelectAllRowsChange,
+  totalColumns,
 }: DataTablePaginationProps<TData>) => {
   const renderTotal = () => {
     const selected = Object.keys(table.getState().rowSelection).length;
@@ -71,11 +78,10 @@ export const DataTablePagination = <TData,>({
       );
     }
 
-    return (
-      <span>
-        {prettyNumber(numRows)} {new PluralWord("row").pluralize(numRows)}
-      </span>
-    );
+    const rowsLabel = `${prettyNumber(numRows)} ${new PluralWord("row").pluralize(numRows)}`;
+    const columnsLabel = `${prettyNumber(totalColumns)} ${new PluralWord("column").pluralize(totalColumns)}`;
+
+    return <span>{[rowsLabel, columnsLabel].join(", ")}</span>;
   };
   const currentPage = Math.min(
     table.getState().pagination.pageIndex + 1,
@@ -111,18 +117,11 @@ export const DataTablePagination = <TData,>({
         </Button>
         <div className="flex items-center justify-center text-xs font-medium gap-1">
           <span>Page</span>
-          <select
-            className="cursor-pointer border rounded"
-            value={currentPage}
-            data-testid="page-select"
-            onChange={(e) => table.setPageIndex(Number(e.target.value) - 1)}
-          >
-            {Array.from({ length: totalPages }, (_, i) => (
-              <option key={i} value={i + 1}>
-                {i + 1}
-              </option>
-            ))}
-          </select>
+          <PageSelector
+            currentPage={currentPage}
+            totalPages={totalPages}
+            onPageChange={(page) => table.setPageIndex(page)}
+          />
           <span className="flex-shrink-0">of {prettyNumber(totalPages)}</span>
         </div>
         <Button
@@ -155,3 +154,80 @@ export const DataTablePagination = <TData,>({
 function prettyNumber(value: number): string {
   return new Intl.NumberFormat().format(value);
 }
+
+export const PageSelector = ({
+  currentPage,
+  totalPages,
+  onPageChange,
+}: {
+  currentPage: number;
+  totalPages: number;
+  onPageChange: (page: number) => void;
+}) => {
+  const renderOption = (i: number) => (
+    <option key={i} value={i + 1}>
+      {i + 1}
+    </option>
+  );
+
+  const renderEllipsis = (key: number) => (
+    <option key={`__${key}__`} disabled={true} value={`__${key}__`}>
+      ...
+    </option>
+  );
+
+  const renderPageOptions = () => {
+    /* If this is too large, this can cause the browser to hang. */
+    if (totalPages <= 100) {
+      return range(totalPages).map((i) => renderOption(i));
+    }
+
+    const middle = Math.floor(totalPages / 2);
+
+    // Show the first 10 pages, the middle 10 pages, and the last 10 pages.
+    const firstPages = range(10).map((i) => renderOption(i));
+    const middlePages = range(10).map((i) => renderOption(middle - 5 + i));
+    const lastPages = range(10).map((i) => renderOption(totalPages - 10 + i));
+
+    const result = [
+      ...firstPages,
+      renderEllipsis(1),
+      ...middlePages,
+      renderEllipsis(2),
+      ...lastPages,
+    ];
+
+    if (currentPage > 10 && currentPage <= middle - 5) {
+      result.splice(
+        10,
+        1, // delete the first ellipsis
+        renderEllipsis(1),
+        renderOption(currentPage - 1),
+        renderEllipsis(11),
+      );
+    }
+
+    if (currentPage > middle + 5 && currentPage <= totalPages - 10) {
+      result.splice(
+        -11,
+        1, // delete the first ellipsis
+        renderEllipsis(2),
+        renderOption(currentPage - 1),
+        renderEllipsis(22),
+      );
+    }
+
+    return result;
+  };
+
+  return (
+    <select
+      className="cursor-pointer border rounded"
+      value={currentPage}
+      data-testid="page-select"
+      onChange={(e) => onPageChange(Number(e.target.value) - 1)}
+    >
+      {renderPageOptions()}
+    </select>
+  );
+};

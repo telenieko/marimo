@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import type React from "react";
 import { useState } from "react";
+import { AIStatusIcon, CopilotStatusIcon } from "./copilot-status";
 
 export const MachineStats: React.FC = (props) => {
   const [nonce, setNonce] = useState(0);
@@ -39,7 +40,7 @@ export const MachineStats: React.FC = (props) => {
   }, [nonce, connection.state]);
 
   return (
-    <div className="flex gap-3">
+    <div className="flex gap-2 items-center">
       {data && (
         <MemoryUsageBar
           memory={data.memory}
@@ -48,6 +49,10 @@ export const MachineStats: React.FC = (props) => {
         />
       )}
       {data && <CPUBar cpu={data.cpu} />}
+      <div className="flex items-center">
+        <AIStatusIcon />
+        <CopilotStatusIcon />
+      </div>
       <BackendConnection connection={connection.state} />
     </div>
   );

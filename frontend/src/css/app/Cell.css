@@ -80,6 +80,14 @@
     }
   }
 
+  > [data-hidden="true"] ~ * {
+    border-top: none;
+  }
+
+  > * ~ [data-hidden="true"] {
+    border-top: none;
+  }
+
   /* Stale styles for Cell */
   &.stale,
   &.disabled.stale {
@@ -192,6 +200,18 @@
     }
   }
 
+  /* Borderless styles for Cell */
+  &.borderless {
+    border-color: transparent;
+    box-shadow: none;
+
+    /* Apply the original styles */
+    &:hover {
+      border: 1px solid var(--gray-4);
+      @apply shadow-smSolid shadow-shade;
+    }
+  }
+
   /* -------------------------- Shoulders/Buttons ---------------------------- */
   .shoulder-right {
     display: inline-flex;
@@ -199,17 +219,15 @@
     justify-content: flex-end;
     height: 100%;
     position: absolute;
-    right: -94px;
+    right: -90px;
     width: 80px;
     gap: 4px;
-    z-index: 2;
   }
 
   .shoulder-bottom {
     position: absolute;
     bottom: -2px;
     right: 2px;
-    z-index: 2; /* lie above editor */
   }
 
   @apply bg-background;
@@ -261,7 +279,7 @@
   /* expand the hover area left and right */
   &::before,
   &::after {
-    content: '';
+    content: "";
     position: absolute;
     width: var(--gutter-width);
     max-width: var(--gutter-width);
@@ -288,7 +306,7 @@
 :root {
   /* Set a fixed gutter width to ensure the hover area is always wide enough */
   /* And make the gutter bigger when the window is super wide */
-  --gutter-width: max(calc(50vw - (var(--content-width) / 2)), 50px);
+  --gutter-width: 100px;
 }
 
 /* ------------------------ CodeMirror Editor ----------------------------- */
@@ -304,8 +322,6 @@
 .Cell .cm-editor {
   border: 1px solid transparent;
   padding: 3px;
-
-  /* leave some room for UI elements inside the code editor */
   padding-right: 24px;
 
   &.cm-focused {
@@ -363,8 +379,9 @@
 .marimo-output-stale,
 .Cell.stale .output-area.marimo-output-stale,
 .Cell.stale .console-output-area.marimo-output-stale {
-  opacity: 0.2;
-  transition: opacity 300ms;
+  opacity: 0.8;
+  filter: grayscale(50%);
+  transition: 300ms;
   transition-delay: 200ms;
 }
 

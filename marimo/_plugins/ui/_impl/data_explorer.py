@@ -1,48 +1,43 @@
 # Copyright 2023 Marimo. All rights reserved.
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Dict, Final, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Final, Optional
 
+import marimo._output.data.data as mo_data
+from marimo._dependencies.dependencies import DependencyManager
+from marimo._output.rich_help import mddoc
+from marimo._plugins.ui._core.ui_element import UIElement
 from marimo._plugins.ui._impl.tables.utils import get_table_manager
 
 if TYPE_CHECKING:
-    import pandas as pd
-    import polars as pl
-    import pyarrow as pa
-
-
-import marimo._output.data.data as mo_data
-from marimo._output.rich_help import mddoc
-from marimo._plugins.ui._core.ui_element import UIElement
+    from narwhals.typing import IntoDataFrame
 
 
 @mddoc
 class data_explorer(UIElement[Dict[str, Any], Dict[str, Any]]):
-    """
-    Quickly explore a DataFrame with automatically suggested visualizations.
+    """Quickly explore a DataFrame with automatically suggested visualizations.
 
-    **Example.**
+    Examples:
+        ```python
+        mo.ui.data_explorer(data)
+        ```
 
-    ```python
-    mo.ui.data_explorer(data)
-    ```
+    Attributes:
+        value (Dict[str, Any]): The resulting DataFrame chart spec.
 
-    **Attributes.**
-
-    - `value`: the resulting DataFrame chart spec
-
-    **Initialization Args.**
-
-    - `df`: the DataFrame to visualize
+    Args:
+        df (IntoDataFrame): The DataFrame to visualize.
     """
 
     _name: Final[str] = "marimo-data-explorer"
 
     def __init__(
         self,
-        df: Union[pd.DataFrame, pl.DataFrame, pa.Table],
+        df: IntoDataFrame,
         on_change: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
+        # Drop the index since empty column names break the data explorer
+        df = _drop_index(df)
         self._data = df
 
         manager = get_table_manager(df)
@@ -59,3 +54,12 @@ class data_explorer(UIElement[Dict[str, Any], Dict[str, Any]]):
 
     def _convert_value(self, value: Dict[str, Any]) -> Dict[str, Any]:
         return value
+
+
+def _drop_index(df: IntoDataFrame) -> IntoDataFrame:
+    if DependencyManager.pandas.imported():
+        import pandas as pd
+
+        if isinstance(df, pd.DataFrame):
+            return df.reset_index(drop=True)
+    return df

@@ -4,17 +4,20 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import os
+import re
 import sys
 import textwrap
 from tempfile import TemporaryDirectory
-from typing import Any, Generator
+from typing import TYPE_CHECKING, Any, Generator
 
 import pytest
+from _pytest import runner
 
 from marimo._ast.app import CellManager
 from marimo._ast.cell import CellId_t
 from marimo._config.config import DEFAULT_CONFIG
 from marimo._messaging.mimetypes import KnownMimeType
+from marimo._messaging.ops import CellOp, MessageOperation
 from marimo._messaging.streams import (
     ThreadSafeStderr,
     ThreadSafeStdin,
@@ -29,6 +32,11 @@ from marimo._runtime.input_override import input_override
 from marimo._runtime.marimo_pdb import MarimoPdb
 from marimo._runtime.requests import AppMetadata, ExecutionRequest
 from marimo._runtime.runtime import Kernel
+from marimo._server.model import SessionMode
+from marimo._utils.parse_dataclass import parse_raw
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 # register import hooks for third-party module formatters
 register_formatters()
@@ -45,6 +53,21 @@ class _MockStream(ThreadSafeStream):
     def write(self, op: str, data: dict[Any, Any]) -> None:
         self.messages.append((op, data))
 
+    @property
+    def operations(self) -> list[MessageOperation]:
+        @dataclasses.dataclass
+        class Container:
+            operation: MessageOperation
+
+        return [
+            parse_raw({"operation": op_data}, Container).operation
+            for _op_name, op_data in self.messages
+        ]
+
+    @property
+    def cell_ops(self) -> list[CellOp]:
+        return [op for op in self.operations if isinstance(op, CellOp)]
+
 
 class MockStdout(ThreadSafeStdout):
     """Captures the output sent through the stream"""
@@ -57,6 +80,9 @@ class MockStdout(ThreadSafeStdout):
         del mimetype
         self.messages.append(data)
         return len(data)
+
+    def __repr__(self) -> str:
+        return "".join(self.messages)
 
 
 class MockStderr(ThreadSafeStderr):
@@ -72,6 +98,10 @@ class MockStderr(ThreadSafeStderr):
         del mimetype
         self.messages.append(data)
         return len(data)
+
+    def __repr__(self) -> str:
+        # Error messages are commonly formatted for output in HTML
+        return re.sub(r"<.*?>", "", "".join(self.messages))
 
 
 class MockStdin(ThreadSafeStdin):
@@ -90,6 +120,7 @@ class MockedKernel:
     """Should only be created in fixtures b/c inits a runtime context"""
 
     stream: _MockStream = dataclasses.field(default_factory=_MockStream)
+    session_mode: SessionMode = SessionMode.EDIT
 
     def __post_init__(self) -> None:
         self.stdout = MockStdout(self.stream)
@@ -120,6 +151,8 @@ class MockedKernel:
             stream=self.stream,  # type: ignore
             stdout=self.stdout,  # type: ignore
             stderr=self.stderr,  # type: ignore
+            virtual_files_supported=True,
+            mode=self.session_mode,
         )
 
     def teardown(self) -> None:
@@ -127,6 +160,8 @@ class MockedKernel:
         teardown_context()
         self.stdout._watcher.stop()
         self.stderr._watcher.stop()
+        if self.k.module_watcher is not None:
+            self.k.module_watcher.stop()
         sys.modules["__main__"] = self._main
 
 
@@ -153,6 +188,14 @@ def strict_kernel() -> Generator[Kernel, None, None]:
     mocked.k.execution_type = "strict"
     mocked.k.reactive_execution_mode = "autorun"
     yield mocked.k
+    mocked.teardown()
+
+
+# kernel configured in SessionMode.RUN mode
+@pytest.fixture
+def run_mode_kernel() -> Generator[MockedKernel, None, None]:
+    mocked = MockedKernel(session_mode=SessionMode.RUN)
+    yield mocked
     mocked.teardown()
 
 
@@ -192,6 +235,49 @@ def temp_marimo_file() -> Generator[str, None, None]:
     tmp_file = os.path.join(tmp_dir.name, "notebook.py")
     content = inspect.cleandoc(
         """
+        import marimo
+        app = marimo.App()
+
+        @app.cell
+        def __():
+            import marimo as mo
+            return mo,
+
+        @app.cell
+        def __(mo):
+            slider = mo.ui.slider(0, 10)
+            return slider,
+
+        if __name__ == "__main__":
+            app.run()
+        """
+    )
+
+    try:
+        with open(tmp_file, "w") as f:
+            f.write(content)
+        yield tmp_file
+    finally:
+        tmp_dir.cleanup()
+
+
+@pytest.fixture
+def temp_sandboxed_marimo_file() -> Generator[str, None, None]:
+    tmp_dir = TemporaryDirectory()
+    tmp_file = os.path.join(tmp_dir.name, "notebook.py")
+    content = inspect.cleandoc(
+        """
+        # Copyright 2024 Marimo. All rights reserved.
+        # /// script
+        # requires-python = ">=3.11"
+        # dependencies = [
+        #     "polars",
+        #     "marimo>=0.8.0",
+        #     "quak",
+        #     "vega-datasets",
+        # ]
+        # ///
+
         import marimo
         app = marimo.App()
 
@@ -299,11 +385,6 @@ def temp_marimo_file_with_md() -> Generator[str, None, None]:
         app = marimo.App()
 
         @app.cell
-        def __():
-            import marimo as mo
-            return mo,
-
-        @app.cell
         def __(mo):
             control_dep = None
             mo.md("markdown")
@@ -312,9 +393,18 @@ def temp_marimo_file_with_md() -> Generator[str, None, None]:
         @app.cell
         def __(mo, control_dep):
             control_dep
-            mo.md(f"parametrized markdown {123}")
+            mo.md(f"parameterized markdown {123}")
             return
 
+        @app.cell
+        def __():
+            mo.md("plain markdown")
+            return mo,
+
+        @app.cell
+        def __():
+            import marimo as mo
+            return mo,
 
         if __name__ == "__main__":
             app.run()
@@ -362,6 +452,75 @@ def temp_md_marimo_file() -> Generator[str, None, None]:
         tmp_dir.cleanup()
 
 
+@pytest.fixture
+def temp_marimo_file_with_errors() -> Generator[str, None, None]:
+    tmp_dir = TemporaryDirectory()
+    tmp_file = os.path.join(tmp_dir.name, "notebook.py")
+    content = inspect.cleandoc(
+        """
+        import marimo
+        app = marimo.App()
+
+        @app.cell
+        def __():
+            import marimo as mo
+            return mo,
+
+        @app.cell
+        def __(mo):
+            slider = mo.ui.slider(0, 10)
+            return slider,
+
+        @app.cell
+        def __():
+            1 / 0
+            return
+
+        if __name__ == "__main__":
+            app.run()
+        """
+    )
+
+    try:
+        with open(tmp_file, "w") as f:
+            f.write(content)
+        yield tmp_file
+    finally:
+        tmp_dir.cleanup()
+
+
+@pytest.fixture
+def temp_marimo_file_with_multiple_definitions() -> Generator[str, None, None]:
+    tmp_dir = TemporaryDirectory()
+    tmp_file = os.path.join(tmp_dir.name, "notebook.py")
+    content = inspect.cleandoc(
+        """
+        import marimo
+        app = marimo.App()
+
+        @app.cell
+        def __():
+            x = 1
+            return x,
+
+        @app.cell
+        def __():
+            x = 2
+            return x,
+
+        if __name__ == "__main__":
+            app.run()
+        """
+    )
+
+    try:
+        with open(tmp_file, "w") as f:
+            f.write(content)
+        yield tmp_file
+    finally:
+        tmp_dir.cleanup()
+
+
 # Factory to create ExecutionRequests and abstract away cell ID
 class ExecReqProvider:
     def __init__(self) -> None:
@@ -379,3 +538,34 @@ class ExecReqProvider:
 @pytest.fixture
 def exec_req() -> ExecReqProvider:
     return ExecReqProvider()
+
+
+# Library fixtures for direct marimo integration with pytest.
+@pytest.fixture
+def mo_fixture() -> ModuleType:
+    import marimo as mo
+
+    return mo
+
+
+# A pytest hook to fail when raw marimo cells are not collected.
+@pytest.hookimpl
+def pytest_make_collect_report(collector):
+    report = runner.pytest_make_collect_report(collector)
+    # Defined within the file does not seem to hook correctly, as such filter
+    # for the test_pytest specific file here.
+    if "test_pytest" in str(collector.path):
+        collected = {fn.name: fn for fn in collector.collect()}
+        from tests._ast.test_pytest import app
+
+        invalid = []
+        for name in app._cell_manager.names():
+            if name.startswith("test_") and name not in collected:
+                invalid.append(f"'{name}'")
+        if invalid:
+            tests = ", ".join([f"'{test}'" for test in collected.keys()])
+            report.outcome = "failed"
+            report.longrepr = (
+                f"Cannot collect test(s) {', '.join(invalid)} from {tests}"
+            )
+    return report

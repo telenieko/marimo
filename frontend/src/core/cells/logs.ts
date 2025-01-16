@@ -3,6 +3,8 @@ import { invariant } from "@/utils/invariant";
 import type { CellMessage, OutputMessage } from "../kernel/messages";
 import type { CellId } from "./ids";
 import { fromUnixTime } from "date-fns";
+import { isErrorMime } from "../mime";
+import { toast } from "@/components/ui/use-toast";
 
 export interface CellLog {
   timestamp: number;
@@ -11,11 +13,13 @@ export interface CellLog {
   cellId: CellId;
 }
 
+let didAlreadyToastError = false;
+
 export function getCellLogsForMessage(cell: CellMessage): CellLog[] {
   const logs: CellLog[] = [];
-  const outputs: OutputMessage[] = [cell.console].filter(Boolean).flat();
+  const consoleOutputs: OutputMessage[] = [cell.console].filter(Boolean).flat();
 
-  for (const output of outputs) {
+  for (const output of consoleOutputs) {
     if (output.mimetype === "text/plain") {
       invariant(typeof output.data === "string", "expected string");
       const isError =
@@ -39,6 +43,36 @@ export function getCellLogsForMessage(cell: CellMessage): CellLog[] {
 
   // Log each to the console
   logs.forEach(CellLogLogger.log);
+
+  // If there is no console output, but there is an error output, let's log that instead
+  // This happens in run mode when stderr is not sent to the client.
+  if (
+    consoleOutputs.length === 0 &&
+    isErrorMime(cell.output?.mimetype) &&
+    Array.isArray(cell.output.data)
+  ) {
+    cell.output.data.forEach((error) => {
+      CellLogLogger.log({
+        level: "stderr",
+        cellId: cell.cell_id as CellId,
+        timestamp: cell.timestamp,
+        message: JSON.stringify(error),
+      });
+    });
+
+    const shouldToast = cell.output.data.some(
+      (error) => error.type === "internal",
+    );
+    if (!didAlreadyToastError && shouldToast) {
+      didAlreadyToastError = true;
+      toast({
+        title: "An internal error occurred",
+        description: "See console for details.",
+        className:
+          "text-xs text-background bg-[var(--red-10)] py-2 pl-3 [&>*]:flex [&>*]:gap-3",
+      });
+    }
+  }
 
   return logs;
 }

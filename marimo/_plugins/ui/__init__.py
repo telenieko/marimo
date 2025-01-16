@@ -4,25 +4,32 @@
 This module contains a library of interactive UI elements.
 """
 
+from __future__ import annotations
+
 __all__ = [
     "altair_chart",
+    "anywidget",
     "array",
     "batch",
     "button",
+    "chat",
     "checkbox",
     "code_editor",
     "data_explorer",
-    "date",
     "dataframe",
+    "date_range",
+    "date",
+    "datetime",
+    "experimental_data_editor",
     "dictionary",
     "dropdown",
-    "file",
     "file_browser",
+    "file",
     "form",
-    "anywidget",
     "microphone",
     "multiselect",
     "number",
+    "panel",
     "plotly",
     "radio",
     "range_slider",
@@ -39,15 +46,24 @@ __all__ = [
 from marimo._plugins.ui._impl.altair_chart import altair_chart
 from marimo._plugins.ui._impl.array import array
 from marimo._plugins.ui._impl.batch import batch
+from marimo._plugins.ui._impl.chat.chat import chat
+from marimo._plugins.ui._impl.data_editor import (
+    data_editor as experimental_data_editor,
+)
 from marimo._plugins.ui._impl.data_explorer import data_explorer
 from marimo._plugins.ui._impl.dataframes.dataframe import dataframe
+from marimo._plugins.ui._impl.dates import (
+    date,
+    date_range,
+    datetime,
+)
 from marimo._plugins.ui._impl.dictionary import dictionary
 from marimo._plugins.ui._impl.from_anywidget import anywidget
+from marimo._plugins.ui._impl.from_panel import panel
 from marimo._plugins.ui._impl.input import (
     button,
     checkbox,
     code_editor,
-    date,
     dropdown,
     file,
     file_browser,

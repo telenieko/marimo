@@ -1,21 +1,21 @@
 # Copyright 2024 Marimo. All rights reserved.
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple, cast
+from functools import cached_property
+from typing import Any, Optional, Tuple, Union
+
+import narwhals.stable.v1 as nw
 
 from marimo._data.models import (
-    ColumnSummary,
     ExternalDataType,
-    NonNestedLiteral,
 )
 from marimo._plugins.ui._impl.tables.format import (
     FormatMapping,
     format_value,
 )
+from marimo._plugins.ui._impl.tables.narwhals_table import NarwhalsTableManager
 from marimo._plugins.ui._impl.tables.table_manager import (
-    ColumnName,
     FieldType,
-    FieldTypes,
     TableManager,
     TableManagerFactory,
 )
@@ -30,18 +30,36 @@ class PolarsTableManagerFactory(TableManagerFactory):
     def create() -> type[TableManager[Any]]:
         import polars as pl
 
-        class PolarsTableManager(TableManager[pl.DataFrame]):
+        class PolarsTableManager(
+            NarwhalsTableManager[Union[pl.DataFrame, pl.LazyFrame]]
+        ):
             type = "polars"
 
+            def __init__(
+                self, data: Union[pl.DataFrame, pl.LazyFrame]
+            ) -> None:
+                self._original_data = data
+                super().__init__(nw.from_native(data))
+
+            def collect(self) -> pl.DataFrame:
+                native: Any = self._original_data
+                if isinstance(native, pl.LazyFrame):
+                    return native.collect()
+                if isinstance(native, pl.DataFrame):
+                    return native
+                raise ValueError(f"Unsupported native type: {type(native)}")
+
+            @cached_property
+            def schema(self) -> dict[str, pl.DataType]:
+                return self._original_data.schema
+
+            # We override narwhals's to_csv to handle polars
+            # nested data types.
             def to_csv(
                 self,
                 format_mapping: Optional[FormatMapping] = None,
             ) -> bytes:
-                _data = (
-                    self.apply_formatting(format_mapping)
-                    if format_mapping
-                    else self.data
-                )
+                _data = self.apply_formatting(format_mapping).collect()
                 try:
                     return _data.write_csv().encode("utf-8")
                 except pl.exceptions.ComputeError:
@@ -65,30 +83,38 @@ class PolarsTableManagerFactory(TableManagerFactory):
                                 ).arr.join(",")
                             )
                         elif isinstance(dtype, pl.Object):
-                            result = result.with_columns(column.cast(str))
-                        elif isinstance(dtype, pl.Duration):
-                            if dtype.time_unit == "ms":
-                                result = result.with_columns(
-                                    column.dt.total_milliseconds()
-                                )
+                            import warnings
 
-                            elif dtype.time_unit == "ns":
+                            with warnings.catch_warnings(record=True):
                                 result = result.with_columns(
-                                    column.dt.total_nanoseconds()
+                                    # As of writing this, cast(pl.String) doesn't work
+                                    # for pl.Object types, so we use map_elements
+                                    column.map_elements(
+                                        str, return_dtype=pl.String
+                                    )
                                 )
-                            elif dtype.time_unit == "us":
-                                result = result.with_columns(
-                                    column.dt.total_microseconds()
-                                )
+                        elif isinstance(dtype, pl.Duration):
+                            unit_map = {
+                                "ms": column.dt.total_milliseconds,
+                                "ns": column.dt.total_nanoseconds,
+                                "us": column.dt.total_microseconds,
+                                "s": column.dt.total_seconds,
+                            }
+                            if dtype.time_unit in unit_map:
+                                method = unit_map[dtype.time_unit]
+                                result = result.with_columns(method())
                     return result.write_csv().encode("utf-8")
 
             def to_json(self) -> bytes:
-                return self.data.write_json().encode("utf-8")
+                return self.collect().write_json().encode("utf-8")
 
             def apply_formatting(
-                self, format_mapping: FormatMapping
-            ) -> pl.DataFrame:
-                _data = self.data
+                self, format_mapping: Optional[FormatMapping]
+            ) -> PolarsTableManager:
+                if not format_mapping:
+                    return self
+
+                _data = self.collect()
                 for col in _data.columns:
                     if col in format_mapping:
                         _data = _data.with_columns(
@@ -100,145 +126,80 @@ class PolarsTableManagerFactory(TableManagerFactory):
                                 ],
                             )
                         )
-                return _data
-
-            def supports_filters(self) -> bool:
-                return True
-
-            def select_rows(
-                self, indices: list[int]
-            ) -> TableManager[pl.DataFrame]:
-                return PolarsTableManager(self.data[indices])
-
-            def select_columns(
-                self, columns: list[str]
-            ) -> TableManager[pl.DataFrame]:
-                return PolarsTableManager(self.data.select(columns))
-
-            def get_row_headers(
-                self,
-            ) -> list[str]:
-                return []
+                return PolarsTableManager(_data)
 
             @staticmethod
             def is_type(value: Any) -> bool:
                 return isinstance(value, pl.DataFrame)
 
-            def get_field_types(self) -> FieldTypes:
-                return {
-                    column: PolarsTableManager._get_field_type(
-                        self.data[column]
-                    )
-                    for column in self.data.columns
-                }
-
-            def take(self, count: int, offset: int) -> PolarsTableManager:
-                if count < 0:
-                    raise ValueError("Count must be a positive integer")
-                if offset < 0:
-                    raise ValueError("Offset must be a non-negative integer")
-                return PolarsTableManager(self.data.slice(offset, count))
-
-            def search(self, query: str) -> TableManager[Any]:
+            def search(self, query: str) -> PolarsTableManager:
                 query = query.lower()
 
-                expressions = [
-                    pl.col(column).str.contains(f"(?i){query}")
-                    for column in self.data.columns
-                ]
+                expressions: list[pl.Expr] = []
+                for column, dtype in self.schema.items():
+                    if dtype == pl.String:
+                        expressions.append(
+                            pl.col(column).str.contains(f"(?i){query}")
+                        )
+                    elif dtype == pl.List(pl.Utf8):
+                        expressions.append(pl.col(column).list.contains(query))
+                    elif (
+                        dtype.is_numeric()
+                        or dtype.is_temporal()
+                        or dtype == pl.Boolean
+                    ):
+                        expressions.append(
+                            pl.col(column)
+                            .cast(pl.String)
+                            .str.contains(f"(?i){query}")
+                        )
+
+                if not expressions:
+                    return self
+
                 or_expr = expressions[0]
                 for expr in expressions[1:]:
                     or_expr = or_expr | expr
 
-                filtered = self.data.filter(or_expr)
+                filtered = self._original_data.filter(or_expr)
                 return PolarsTableManager(filtered)
 
-            def get_summary(self, column: str) -> ColumnSummary:
-                # If column is not in the dataframe, return an empty summary
-                if column not in self.data.columns:
-                    return ColumnSummary()
-                col = self.data[column]
-                total = len(col)
-                if col.dtype == pl.String:
-                    return ColumnSummary(
-                        total=total,
-                        nulls=col.null_count(),
-                        unique=col.n_unique(),
-                    )
-                if col.dtype == pl.Boolean:
-                    return ColumnSummary(
-                        total=total,
-                        nulls=col.null_count(),
-                        true=cast(int, col.sum()),
-                        false=cast(int, total - col.sum()),
-                    )
-                if col.dtype.is_temporal():
-                    return ColumnSummary(
-                        total=total,
-                        nulls=col.null_count(),
-                        min=cast(NonNestedLiteral, col.min()),
-                        max=cast(NonNestedLiteral, col.max()),
-                        mean=cast(NonNestedLiteral, col.mean()),
-                        median=cast(NonNestedLiteral, col.median()),
-                        p5=col.quantile(0.05),
-                        p25=col.quantile(0.25),
-                        p75=col.quantile(0.75),
-                        p95=col.quantile(0.95),
-                    )
-                return ColumnSummary(
-                    total=total,
-                    nulls=col.null_count(),
-                    unique=col.n_unique() if col.dtype.is_integer() else None,
-                    min=cast(NonNestedLiteral, col.min()),
-                    max=cast(NonNestedLiteral, col.max()),
-                    mean=cast(NonNestedLiteral, col.mean()),
-                    median=cast(NonNestedLiteral, col.median()),
-                    std=col.std(),
-                    p5=col.quantile(0.05),
-                    p25=col.quantile(0.25),
-                    p75=col.quantile(0.75),
-                    p95=col.quantile(0.95),
-                )
-
-            def get_num_rows(self, force: bool = True) -> int:
-                del force
-                return self.data.height
-
-            def get_num_columns(self) -> int:
-                return self.data.width
-
-            def get_column_names(self) -> list[str]:
-                return self.data.columns
-
-            def get_unique_column_values(
-                self, column: str
-            ) -> list[str | int | float]:
-                return self.data[column].unique().to_list()
-
-            def sort_values(
-                self, by: ColumnName, descending: bool
-            ) -> PolarsTableManager:
-                sorted_data = self.data.sort(by, descending=descending)
-                return PolarsTableManager(sorted_data)
-
-            @staticmethod
-            def _get_field_type(
-                column: pl.Series,
+            # We override the default implementation to use polars's
+            # internal fields since they get displayed in the UI.
+            def get_field_type(
+                self, column_name: str
             ) -> Tuple[FieldType, ExternalDataType]:
+                dtype = self.schema[column_name]
                 try:
-                    dtype_string = column.dtype._string_repr()
+                    dtype_string = dtype._string_repr()
                 except (TypeError, AttributeError):
-                    dtype_string = str(column.dtype)
-                if column.dtype == pl.String:
+                    dtype_string = str(dtype)
+                if (
+                    dtype == pl.String
+                    or dtype == pl.Categorical
+                    or dtype == pl.Enum
+                ):
                     return ("string", dtype_string)
-                elif column.dtype == pl.Boolean:
+                elif dtype == pl.Boolean:
                     return ("boolean", dtype_string)
-                elif column.dtype.is_integer():
+                elif dtype.is_integer():
                     return ("integer", dtype_string)
-                elif column.dtype.is_float() or column.dtype.is_numeric():
+                elif (
+                    dtype.is_float()
+                    or dtype.is_numeric()
+                    or dtype.is_decimal()
+                ):
                     return ("number", dtype_string)
-                elif column.dtype.is_temporal():
+                elif dtype == pl.Date:
                     return ("date", dtype_string)
+                elif dtype == pl.Time:
+                    return ("time", dtype_string)
+                elif dtype == pl.Duration:
+                    return ("number", dtype_string)
+                elif dtype == pl.Datetime:
+                    return ("datetime", dtype_string)
+                elif dtype.is_temporal():
+                    return ("datetime", dtype_string)
                 else:
                     return ("unknown", dtype_string)
 

@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/1.8.3/schema.json",
+  "$schema": "frontend/node_modules/@biomejs/biome/configuration_schema.json",
   "formatter": {
     "enabled": true,
     "formatWithErrors": false,
@@ -8,32 +8,14 @@
     "lineEnding": "lf",
     "lineWidth": 80,
     "attributePosition": "auto",
-    "ignore": [
-      "dist",
-      "lib",
-      "pnpm-lock.yaml",
-      "storybook-static",
-      "package.json"
-    ]
+    "ignore": ["pnpm-lock.yaml", "storybook-static", "package.json"]
   },
   "organizeImports": {
-    "ignore": [
-      "dist",
-      "lib",
-      "pnpm-lock.yaml",
-      "storybook-static",
-      "package.json"
-    ],
+    "ignore": ["pnpm-lock.yaml", "storybook-static", "package.json"],
     "enabled": false
   },
   "linter": {
-    "ignore": [
-      "dist",
-      "lib",
-      "pnpm-lock.yaml",
-      "storybook-static",
-      "package.json"
-    ],
+    "ignore": ["pnpm-lock.yaml", "storybook-static", "package.json"],
     "enabled": true,
     "rules": {
       "recommended": true,
@@ -43,6 +25,8 @@
         "useButtonType": "info",
         "useIframeTitle": "info",
         "useKeyWithClickEvents": "off",
+        "useGenericFontNames": "off",
+        "useSemanticElements": "warn",
         "useMediaCaption": "info"
       },
       "complexity": {
@@ -64,6 +48,37 @@
         "noNonNullAssertion": "off",
         "noParameterAssign": "off",
         "noUnusedTemplateLiteral": "error",
+        "useNamingConvention": {
+          "level": "warn",
+          "options": {
+            "strictCase": false,
+            "conventions": [
+              {
+                "selector": { "kind": "const", "scope": "global" },
+                "match": ".*"
+              },
+              {
+                "selector": { "kind": "let", "scope": "global" },
+                "match": ".*"
+              },
+              {
+                "selector": { "kind": "function" },
+                "formats": ["camelCase", "PascalCase"]
+              },
+              {
+                "selector": { "kind": "variable" },
+                "formats": ["camelCase", "PascalCase", "CONSTANT_CASE"]
+              },
+              {
+                "selector": { "kind": "typeLike" },
+                "formats": ["PascalCase", "CONSTANT_CASE", "camelCase"]
+              },
+              {
+                "match": ".*"
+              }
+            ]
+          }
+        },
         "useConsistentArrayType": "off",
         "useImportType": "error",
         "useNodejsImportProtocol": "error",
@@ -96,5 +111,10 @@
       "quoteStyle": "double",
       "attributePosition": "auto"
     }
+  },
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
   }
 }

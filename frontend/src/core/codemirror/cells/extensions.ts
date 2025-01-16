@@ -18,6 +18,7 @@ export interface MovementCallbacks
   deleteCell: () => void;
   createAbove: () => void;
   createBelow: () => void;
+  createManyBelow: (content: string[]) => void;
   moveUp: () => void;
   moveDown: () => void;
   focusUp: () => void;
@@ -107,20 +108,20 @@ export function cellMovementBundle(
       },
     },
     {
-      key: hotkeys.getHotkey("cell.moveDown").key,
-      preventDefault: true,
-      stopPropagation: true,
-      run: () => {
-        moveDown();
-        return true;
-      },
-    },
-    {
       key: hotkeys.getHotkey("cell.moveUp").key,
       preventDefault: true,
       stopPropagation: true,
       run: () => {
         moveUp();
+        return true;
+      },
+    },
+    {
+      key: hotkeys.getHotkey("cell.moveDown").key,
+      preventDefault: true,
+      stopPropagation: true,
+      run: () => {
+        moveDown();
         return true;
       },
     },
@@ -227,7 +228,10 @@ export function cellMovementBundle(
         if (isHidden) {
           ev.contentDOM.blur();
           // Focus on the parent element
-          document.getElementById(HTMLCellId.create(cellId))?.focus();
+          // https://github.com/marimo-team/marimo/issues/2941
+          document
+            .getElementById(HTMLCellId.create(cellId))
+            ?.parentElement?.focus();
         } else {
           ev.contentDOM.focus();
         }
@@ -293,12 +297,12 @@ export function cellCodeEditingBundle(
   const { updateCellCode } = callbacks;
 
   const onChangePlugin = EditorView.updateListener.of((update) => {
-    // Check if the doc update was a formatting change
-    // e.g. changing from python to markdown
-    const isFormattingChange = update.transactions.some((tr) =>
-      tr.effects.some((effect) => effect.is(formattingChangeEffect)),
-    );
     if (update.docChanged) {
+      // Check if the doc update was a formatting change
+      // e.g. changing from python to markdown
+      const isFormattingChange = update.transactions.some((tr) =>
+        tr.effects.some((effect) => effect.is(formattingChangeEffect)),
+      );
       const nextCode = getEditorCodeAsPython(update.view);
       updateCellCode({
         cellId,
@@ -309,4 +313,29 @@ export function cellCodeEditingBundle(
   });
 
   return [onChangePlugin, formatKeymapExtension(cellId, callbacks, hotkeys)];
+}
+
+/**
+ * Extension for auto-running markdown cells
+ */
+export function markdownAutoRunExtension(
+  callbacks: MovementCallbacks,
+): Extension {
+  return EditorView.updateListener.of((update) => {
+    // If the doc didn't change, ignore
+    if (!update.docChanged) {
+      return;
+    }
+
+    // This happens on mount when we start in markdown mode
+    const isFormattingChange = update.transactions.some((tr) =>
+      tr.effects.some((effect) => effect.is(formattingChangeEffect)),
+    );
+    if (isFormattingChange) {
+      // Ignore formatting changes
+      return;
+    }
+
+    callbacks.onRun();
+  });
 }

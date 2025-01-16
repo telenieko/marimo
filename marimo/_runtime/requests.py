@@ -51,9 +51,9 @@ class ExecuteMultipleRequest:
         ]
 
     def __post_init__(self) -> None:
-        assert len(self.cell_ids) == len(
-            self.codes
-        ), "Mismatched cell_ids and codes"
+        assert len(self.cell_ids) == len(self.codes), (
+            "Mismatched cell_ids and codes"
+        )
 
 
 @dataclass
@@ -74,9 +74,9 @@ class SetUIElementValueRequest:
     token: str = field(default_factory=lambda: str(uuid4()))
 
     def __post_init__(self) -> None:
-        assert len(self.object_ids) == len(
-            self.values
-        ), "Mismatched object_ids and values"
+        assert len(self.object_ids) == len(self.values), (
+            "Mismatched object_ids and values"
+        )
 
     @staticmethod
     def from_ids_and_values(
@@ -128,6 +128,7 @@ class SetUserConfigRequest:
 class CreationRequest:
     execution_requests: Tuple[ExecutionRequest, ...]
     set_ui_element_value_request: SetUIElementValueRequest
+    auto_run: bool
 
 
 @dataclass
@@ -149,8 +150,13 @@ class CodeCompletionRequest:
 
 @dataclass
 class InstallMissingPackagesRequest:
-    # TODO: package manager (pip/conda/...), index URL (index/channel/...)
+    # TODO: index URL (index/channel/...)
     manager: str
+
+    # Map from package name to desired version
+    # If the package name is not in the map, the latest version
+    # will be installed
+    versions: Dict[str, str]
 
 
 @dataclass

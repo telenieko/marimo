@@ -4,9 +4,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta  # noqa: TCH003
 from decimal import Decimal
-from typing import List, Literal, Optional, Union
+from typing import Any, List, Literal, Optional, Union
 
-DataType = Literal["string", "boolean", "integer", "number", "date", "unknown"]
+DataType = Literal[
+    "string",
+    "boolean",
+    "integer",
+    "number",
+    "date",
+    "datetime",
+    "time",
+    "unknown",
+]
 # This is the data type based on the source library
 # e.g. polars, pandas, numpy, etc.
 ExternalDataType = str
@@ -25,6 +34,7 @@ class DataTableColumn:
     name: str
     type: DataType
     external_type: ExternalDataType
+    sample_values: List[Any]
 
 
 DataTableSource = Literal["local", "duckdb"]

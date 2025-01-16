@@ -1,5 +1,5 @@
 /* Copyright 2024 Marimo. All rights reserved. */
-import type { HotkeyAction } from "@/core/hotkeys/hotkeys";
+import { type HotkeyAction, NOT_SET } from "@/core/hotkeys/hotkeys";
 import { isPlatformMac } from "@/core/hotkeys/shortcuts";
 import { Kbd } from "../ui/kbd";
 import { DropdownMenuShortcut } from "../ui/dropdown-menu";
@@ -8,17 +8,20 @@ import { hotkeysAtom } from "@/core/config/config";
 import { useAtomValue } from "jotai";
 import { cn } from "@/utils/cn";
 
-export function renderShortcut(shortcut: HotkeyAction) {
-  return <Shortcut shortcut={shortcut} />;
+export function renderShortcut(shortcut: HotkeyAction, includeName = true) {
+  return <Shortcut shortcut={shortcut} includeName={includeName} />;
 }
 
-const Shortcut: React.FC<{ shortcut: HotkeyAction }> = ({ shortcut }) => {
+const Shortcut: React.FC<{ shortcut: HotkeyAction; includeName?: boolean }> = ({
+  shortcut,
+  includeName = true,
+}) => {
   const hotkeys = useAtomValue(hotkeysAtom);
   const hotkey = hotkeys.getHotkey(shortcut);
 
   return (
-    <span className="flex">
-      <span className="mr-2">{hotkey.name}</span>
+    <span className="inline-flex">
+      {includeName && <span className="mr-2">{hotkey.name}</span>}
       <KeyboardHotkeys shortcut={hotkey.key} />
     </span>
   );
@@ -26,8 +29,11 @@ const Shortcut: React.FC<{ shortcut: HotkeyAction }> = ({ shortcut }) => {
 
 export const KeyboardHotkeys: React.FC<{
   className?: string;
-  shortcut: string;
+  shortcut: string | typeof NOT_SET;
 }> = ({ shortcut, className }) => {
+  if (shortcut === NOT_SET || shortcut === "") {
+    return <span />;
+  }
   const keys = shortcut.split("-");
 
   return (
@@ -68,8 +74,11 @@ export const MinimalShortcut: React.FC<{
 
 export const MinimalHotkeys: React.FC<{
   className?: string;
-  shortcut: string;
+  shortcut: string | typeof NOT_SET;
 }> = ({ shortcut, className }) => {
+  if (shortcut === NOT_SET || shortcut === "") {
+    return <span />;
+  }
   const keys = shortcut.split("-");
   return (
     <DropdownMenuShortcut className={cn("flex gap-1 items-center", className)}>

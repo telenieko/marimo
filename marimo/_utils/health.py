@@ -26,19 +26,44 @@ def get_node_version() -> Optional[str]:
 def get_required_modules_list() -> dict[str, str]:
     packages = [
         "click",
-        "importlib-resources",
+        "docutils",
+        "itsdangerous",
         "jedi",
         "markdown",
-        "pymdown-extensions",
+        "narwhals",
+        "packaging",
+        "psutil",
         "pygments",
-        "tomlkit",
-        "uvicorn",
-        "starlette",
-        "websockets",
-        "typing-extensions",
+        "pymdown-extensions",
+        "pyyaml",
         "ruff",
+        "starlette",
+        "tomlkit",
+        "typing-extensions",
+        "uvicorn",
+        "websockets",
     ]
+    return _get_versions(packages, include_missing=True)
 
+
+def get_optional_modules_list() -> dict[str, str]:
+    # List of common libraries we integrate with
+    packages = [
+        "altair",
+        "anywidget",
+        "duckdb",
+        "ibis-framework",
+        "opentelemetry",
+        "pandas",
+        "polars",
+        "pyarrow",
+    ]
+    return _get_versions(packages, include_missing=False)
+
+
+def _get_versions(
+    packages: list[str], include_missing: bool
+) -> dict[str, str]:
     package_versions: dict[str, str] = {}
     # Consider listing all installed modules and their versions
     # Submodules and private modules are can be filtered with:
@@ -47,7 +72,8 @@ def get_required_modules_list() -> dict[str, str]:
         try:
             package_versions[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
-            package_versions[package] = "missing"
+            if include_missing:
+                package_versions[package] = "missing"
 
     return package_versions
 
@@ -109,3 +135,7 @@ def get_chrome_version() -> Optional[str]:
             return None
     except FileNotFoundError:
         return None
+
+
+def get_python_version() -> str:
+    return sys.version.split()[0]

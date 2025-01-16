@@ -1,4 +1,5 @@
 /* Copyright 2024 Marimo. All rights reserved. */
+"use no memo";
 
 import type { DataType } from "@/core/kernel/messages";
 import type { ConditionType } from "@/plugins/impl/data-frames/schema";
@@ -9,7 +10,6 @@ import type { RowData } from "@tanstack/react-table";
 declare module "@tanstack/react-table" {
   //allows us to define custom properties for our columns
   interface ColumnMeta<TData extends RowData, TValue> {
-    type?: "primitive" | "mime";
     rowHeader?: boolean;
     dtype?: string;
     dataType?: DataType;
@@ -17,7 +17,14 @@ declare module "@tanstack/react-table" {
   }
 }
 
-export type FilterType = "text" | "number" | "date" | "select" | "boolean";
+export type FilterType =
+  | "text"
+  | "number"
+  | "date"
+  | "datetime"
+  | "time"
+  | "select"
+  | "boolean";
 
 // Filter is a factory function that creates a filter object
 export const Filter = {
@@ -36,6 +43,18 @@ export const Filter = {
   date(opts: { min?: Date; max?: Date }) {
     return {
       type: "date",
+      ...opts,
+    } as const;
+  },
+  datetime(opts: { min?: Date; max?: Date }) {
+    return {
+      type: "datetime",
+      ...opts,
+    } as const;
+  },
+  time(opts: { min?: Date; max?: Date }) {
+    return {
+      type: "time",
       ...opts,
     } as const;
   },
@@ -60,26 +79,26 @@ export type ColumnFilterForType<T extends FilterType> = T extends FilterType
   : never;
 
 export function filterToFilterCondition(
-  columnId: string,
+  columnIdString: string,
   filter: ColumnFilterValue | undefined,
 ): ConditionType[] | ConditionType {
   if (!filter) {
     return [];
   }
-  const column_id = columnId as ColumnId;
+  const columnId = columnIdString as ColumnId;
   switch (filter.type) {
     case "number": {
       const conditions: ConditionType[] = [];
       if (filter.min !== undefined) {
         conditions.push({
-          column_id,
+          column_id: columnId,
           operator: ">=",
           value: filter.min,
         });
       }
       if (filter.max !== undefined) {
         conditions.push({
-          column_id,
+          column_id: columnId,
           operator: "<=",
           value: filter.max,
         });
@@ -88,22 +107,58 @@ export function filterToFilterCondition(
     }
     case "text":
       return {
-        column_id,
+        column_id: columnId,
         operator: "contains",
         value: filter.text,
       };
-    case "date": {
+    case "datetime": {
       const conditions: ConditionType[] = [];
       if (filter.min !== undefined) {
         conditions.push({
-          column_id,
+          column_id: columnId,
           operator: ">=",
           value: filter.min.toISOString(),
         });
       }
       if (filter.max !== undefined) {
         conditions.push({
-          column_id,
+          column_id: columnId,
+          operator: "<=",
+          value: filter.max.toISOString(),
+        });
+      }
+      return conditions;
+    }
+    case "date": {
+      const conditions: ConditionType[] = [];
+      if (filter.min !== undefined) {
+        conditions.push({
+          column_id: columnId,
+          operator: ">=",
+          value: filter.min.toISOString(),
+        });
+      }
+      if (filter.max !== undefined) {
+        conditions.push({
+          column_id: columnId,
+          operator: "<=",
+          value: filter.max.toISOString(),
+        });
+      }
+      return conditions;
+    }
+    case "time": {
+      const conditions: ConditionType[] = [];
+      if (filter.min !== undefined) {
+        conditions.push({
+          column_id: columnId,
+          operator: ">=",
+          value: filter.min.toISOString(),
+        });
+      }
+      if (filter.max !== undefined) {
+        conditions.push({
+          column_id: columnId,
           operator: "<=",
           value: filter.max.toISOString(),
         });
@@ -113,13 +168,13 @@ export function filterToFilterCondition(
     case "boolean":
       if (filter.value) {
         return {
-          column_id,
+          column_id: columnId,
           operator: "is_true",
         };
       }
       if (!filter.value) {
         return {
-          column_id,
+          column_id: columnId,
           operator: "is_false",
         };
       }
@@ -127,7 +182,7 @@ export function filterToFilterCondition(
       return [];
     case "select":
       return {
-        column_id,
+        column_id: columnId,
         operator: "in",
         value: filter.options,
       };

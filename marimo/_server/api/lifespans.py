@@ -5,24 +5,15 @@ import asyncio
 import contextlib
 import socket
 import sys
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import AbstractAsyncContextManager
+
+from starlette.applications import Starlette
 
 from marimo._server.api.deps import AppState, AppStateBase
 from marimo._server.file_router import AppFileRouter
 from marimo._server.sessions import SessionManager
 from marimo._server.tokens import AuthToken
-
-if sys.version_info < (3, 9):
-    from typing import (
-        AsyncContextManager as AbstractAsyncContextManager,
-        AsyncIterator,
-        Callable,
-        Sequence,
-    )
-else:
-    from collections.abc import AsyncIterator, Callable, Sequence
-    from contextlib import AbstractAsyncContextManager
-
-from starlette.applications import Starlette
 
 if sys.version_info < (3, 10):
     from typing_extensions import TypeAlias
@@ -85,15 +76,6 @@ async def lsp(app: Starlette) -> AsyncIterator[None]:
 
 
 @contextlib.asynccontextmanager
-async def watcher(app: Starlette) -> AsyncIterator[None]:
-    state = AppState.from_app(app)
-    if state.watch:
-        session_mgr = state.session_manager
-        session_mgr.start_file_watcher()
-    yield
-
-
-@contextlib.asynccontextmanager
 async def open_browser(app: Starlette) -> AsyncIterator[None]:
     state = AppState.from_app(app)
     if not state.headless:
@@ -118,10 +100,11 @@ async def logging(app: Starlette) -> AsyncIterator[None]:
     if not manager.quiet:
         file = file_router.maybe_get_single_file()
         print_startup(
-            file.name if file else None,
-            _startup_url(state),
-            manager.mode == SessionMode.RUN,
+            file_name=file.name if file else None,
+            url=_startup_url(state),
+            run=manager.mode == SessionMode.RUN,
             new=file_router.get_unique_file_key() == AppFileRouter.NEW_FILE,
+            network=state.host == "0.0.0.0",
         )
 
     yield

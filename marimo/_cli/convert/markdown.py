@@ -26,7 +26,8 @@ from marimo._ast import codegen
 from marimo._ast.app import App, InternalApp, _AppConfig
 from marimo._ast.cell import Cell, CellConfig
 from marimo._ast.compiler import compile_cell
-from marimo._cli.convert.utils import markdown_to_marimo
+from marimo._ast.names import DEFAULT_CELL_NAME
+from marimo._convert.utils import markdown_to_marimo
 
 MARIMO_MD = "marimo-md"
 MARIMO_CODE = "marimo-code"
@@ -60,8 +61,6 @@ def app_config_from_root(root: Element) -> _AppConfig:
     # Extract meta data from root attributes.
     config_keys = {
         "title": "app_title",
-        "marimo-layout": "layout_file",
-        "marimo-css": "css_file",
     }
     config = {
         config_keys[key]: value
@@ -72,6 +71,7 @@ def app_config_from_root(root: Element) -> _AppConfig:
     config.update({k: v for k, v in root.items() if k not in config_keys})
     # Remove values particular to markdown saves.
     config.pop("marimo-version", None)
+
     return _AppConfig.from_untrusted_dict(config)
 
 
@@ -111,7 +111,7 @@ def _tree_to_app_obj(root: Element) -> SafeWrap:
     app = InternalApp(App(**app_config.asdict()))
 
     for child in root:
-        name = child.get("name", "__")
+        name = child.get("name", DEFAULT_CELL_NAME)
         # Default to hiding markdown cells.
         cell_config = get_cell_config_from_tag(
             child, hide_code=child.tag == MARIMO_MD
@@ -135,7 +135,7 @@ def _tree_to_app_obj(root: Element) -> SafeWrap:
                 cell_id=cell_id,
                 code=source,
                 config=cell_config,
-                name=name or "__",
+                name=name or DEFAULT_CELL_NAME,
                 cell=None,
             )
 
@@ -149,7 +149,7 @@ def _tree_to_app(root: Element) -> str:
     names: list[str] = []
     cell_config: list[CellConfig] = []
     for child in root:
-        names.append(child.get("name", "__"))
+        names.append(child.get("name", DEFAULT_CELL_NAME))
         cell_config.append(get_cell_config_from_tag(child))
         sources.append(get_source_from_tag(child))
 

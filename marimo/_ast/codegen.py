@@ -12,6 +12,7 @@ from marimo import __version__
 from marimo._ast.app import App, _AppConfig
 from marimo._ast.cell import CellConfig, CellImpl
 from marimo._ast.compiler import compile_cell
+from marimo._ast.names import DEFAULT_CELL_NAME
 from marimo._ast.visitor import Name
 
 if TYPE_CHECKING:
@@ -44,6 +45,8 @@ def _to_decorator(config: Optional[CellConfig]) -> str:
         del config.disabled
     if not config.hide_code:
         del config.hide_code
+    if not isinstance(config.column, int):
+        del config.column
 
     if config == CellConfig():
         return "@app.cell"
@@ -85,7 +88,7 @@ def to_functiondef(
         defs = tuple(name for name in sorted(cell.defs))
         returns = INDENT + "return "
         if len(cell.defs) == 1:
-            returns += f"{defs[0]},"
+            returns += f"({defs[0]},)"
         else:
             returns += ", ".join(defs)
         fndef += (
@@ -124,7 +127,9 @@ def generate_unparsable_cell(
 def generate_app_constructor(config: Optional[_AppConfig]) -> str:
     def _format_arg(arg: Any) -> str:
         if isinstance(arg, str):
-            return f'"{arg}"'
+            return f'"{arg}"'.replace("\\", "\\\\")
+        elif isinstance(arg, list):
+            return "[" + ", ".join([_format_arg(item) for item in arg]) + "]"
         else:
             return str(arg)
 
@@ -170,6 +175,12 @@ def generate_filecontents(
 
     unshadowed_builtins = set(builtins.__dict__.keys()) - defs
     fndefs: list[str] = []
+
+    # Update old internal cell names to the new ones
+    for idx, name in enumerate(names):
+        if name == "__":
+            names[idx] = DEFAULT_CELL_NAME
+
     for data, name in zip(cell_data, names):
         if isinstance(data, CellImpl):
             fndefs.append(to_functiondef(data, name, unshadowed_builtins))
@@ -204,7 +215,21 @@ class MarimoFileError(Exception):
 
 
 def get_app(filename: Optional[str]) -> Optional[App]:
-    """Load and return app from a marimo-generated module"""
+    """Load and return app from a marimo-generated module.
+
+    Args:
+        filename: Path to a marimo notebook file (.py or .md)
+
+    Returns:
+        The marimo App instance if the file exists and contains valid code,
+        None if the file is empty or contains only comments.
+
+    Raises:
+        MarimoFileError: If the file exists but doesn't define a valid marimo app
+        RuntimeError: If there are issues loading the module
+        SyntaxError: If the file contains a syntax error
+        FileNotFoundError: If the file doesn't exist
+    """
     if filename is None:
         return None
 
@@ -219,13 +244,24 @@ def get_app(filename: Optional[str]) -> Optional[App]:
 
         return convert_from_md_to_app(contents)
 
+    # Below assumes it's a Python file
+
+    # This means it could have only the package dependencies
+    # but no actual code yet.
+    has_only_comments = all(
+        not line.strip() or line.strip().startswith("#")
+        for line in contents.splitlines()
+    )
+    if has_only_comments:
+        return None
+
     spec = importlib.util.spec_from_file_location("marimo_app", filename)
     if spec is None:
         raise RuntimeError("Failed to load module spec")
     marimo_app = importlib.util.module_from_spec(spec)
     if spec.loader is None:
         raise RuntimeError("Failed to load module spec's loader")
-    spec.loader.exec_module(marimo_app)
+    spec.loader.exec_module(marimo_app)  # This may throw a SyntaxError
     if not hasattr(marimo_app, "app"):
         raise MarimoFileError(f"{filename} missing attribute `app`.")
     if not isinstance(marimo_app.app, App):

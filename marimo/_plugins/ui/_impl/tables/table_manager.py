@@ -4,7 +4,6 @@ from __future__ import annotations
 import abc
 from typing import (
     Any,
-    Dict,
     Generic,
     Optional,
     Tuple,
@@ -20,11 +19,14 @@ T = TypeVar("T")
 
 ColumnName = str
 FieldType = DataType
-FieldTypes = Dict[ColumnName, Tuple[FieldType, ExternalDataType]]
+FieldTypes = list[Tuple[ColumnName, Tuple[FieldType, ExternalDataType]]]
 
 
 class TableManager(abc.ABC, Generic[T]):
-    DEFAULT_COL_LIMIT = 100
+    # Upper limit for column summaries
+    # The only sets the default to show column summaries,
+    # but it can be overridden by the user
+    DEFAULT_SUMMARY_CHARTS_COLUMN_LIMIT = 40
     # Upper limit for frontend table component to show column summary charts
     # to ensure browser performance
     DEFAULT_SUMMARY_CHARTS_ROW_LIMIT = 20_000
@@ -59,7 +61,9 @@ class TableManager(abc.ABC, Generic[T]):
         return True
 
     @abc.abstractmethod
-    def apply_formatting(self, format_mapping: FormatMapping) -> T:
+    def apply_formatting(
+        self, format_mapping: Optional[FormatMapping]
+    ) -> TableManager[Any]:
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -95,10 +99,17 @@ class TableManager(abc.ABC, Generic[T]):
     def get_row_headers(self) -> list[str]:
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def get_field_type(
+        self, column_name: str
+    ) -> Tuple[FieldType, ExternalDataType]:
+        raise NotImplementedError
+
     def get_field_types(self) -> FieldTypes:
-        # By default, don't provide any field types
-        # so the frontend can infer them
-        return {}
+        return [
+            (column_name, self.get_field_type(column_name))
+            for column_name in self.get_column_names()
+        ]
 
     @abc.abstractmethod
     def take(self, count: int, offset: int) -> TableManager[Any]:
@@ -134,6 +145,17 @@ class TableManager(abc.ABC, Generic[T]):
     @abc.abstractmethod
     def get_unique_column_values(self, column: str) -> list[str | int | float]:
         raise NotImplementedError
+
+    @abc.abstractmethod
+    def get_sample_values(self, column: str) -> list[Any]:
+        raise NotImplementedError
+
+    def __repr__(self) -> str:
+        rows = self.get_num_rows(force=False)
+        columns = self.get_num_columns()
+        if rows is None:
+            return f"{self.type}: {columns:,} columns"
+        return f"{self.type}: {rows:,} rows x {columns:,} columns"
 
 
 class TableManagerFactory(abc.ABC):

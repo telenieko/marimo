@@ -4,11 +4,13 @@ from __future__ import annotations
 import abc
 import base64
 import copy
+import random
 import sys
 import types
 import uuid
 import weakref
 from dataclasses import dataclass, fields
+from html import escape
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -111,6 +113,8 @@ class UIElement(Html, Generic[S, T], metaclass=abc.ABCMeta):
     _value_frontend: S
     _value: T
 
+    _random_seed = random.Random(42)
+
     def __init__(
         self,
         component_name: str,
@@ -194,7 +198,11 @@ class UIElement(Html, Generic[S, T], metaclass=abc.ABCMeta):
         # element will trigger a re-render and reset it to its initial value.
         # We need this to ensure that the element on the page is synchronized
         # with the element in the kernel.
-        self._random_id = str(uuid.uuid4())
+        # We use a fixed seed so that we can reproduce the same random ids
+        # across multiple runs (useful when exporting as html or in tests)
+        self._random_id = str(
+            uuid.UUID(int=self._random_seed.getrandbits(128))
+        )
 
         # Stable ID
         #
@@ -346,61 +354,52 @@ class UIElement(Html, Generic[S, T], metaclass=abc.ABCMeta):
     ) -> form_plugin[S, T]:
         """Create a submittable form out of this `UIElement`.
 
-        Use this method to create a form that gates the submission
-        of a `UIElement`s value until a submit button is clicked.
+        Creates a form that gates submission of a `UIElement`'s value until a submit button is clicked.
+        The form's value is the value of the underlying element from the last submission.
 
-        The value of the `form` is the value of the underlying
-        element the last time the form was submitted.
+        Examples:
+            Convert any `UIElement` into a form:
+                ```python
+                prompt = mo.ui.text_area().form()
+                ```
 
-        **Examples.**
+            Combine with `HTML.batch` to create a form made out of multiple `UIElements`:
+                ```python
+                form = (
+                    mo.ui.md(
+                        '''
+                    **Enter your prompt.**
 
-        Convert any `UIElement` into a form:
+                    {prompt}
 
-        ```python
-        prompt = mo.ui.text_area().form()
-        ```
+                    **Choose a random seed.**
 
-        Combine with `HTML.batch` to create a form made out of multiple
-        `UIElements`:
+                    {seed}
+                    '''
+                    )
+                    .batch(
+                        prompt=mo.ui.text_area(),
+                        seed=mo.ui.number(),
+                    )
+                    .form()
+                )
+                ```
 
-        ```python
-        form = (
-            mo.ui.md(
-                '''
-            **Enter your prompt.**
-
-            {prompt}
-
-            **Choose a random seed.**
-
-            {seed}
-            '''
-            )
-            .batch(
-                prompt=mo.ui.text_area(),
-                seed=mo.ui.number(),
-            )
-            .form()
-        )
-        ```
-
-        **Args.**
-
-        - `label`: A text label for the form.
-        - `bordered`: whether the form should have a border
-        - `loading`: whether the form should be in a loading state
-        - `submit_button_label`: the label of the submit button
-        - `submit_button_tooltip`: the tooltip of the submit button
-        - `submit_button_disabled`: whether the submit button should be
-          disabled
-        - `clear_on_submit`: whether the form should clear its contents after
-            submitting
-        - `show_clear_button`: whether the form should show a clear button
-        - `clear_button_label`: the label of the clear button
-        - `clear_button_tooltip`: the tooltip of the clear button
-        - `validate`: a function that takes the form's value and returns an
-            error message if the value is invalid,
-            or `None` if the value is valid
+        Args:
+            label: A text label for the form.
+            bordered: Whether the form should have a border.
+            loading: Whether the form should be in a loading state.
+            submit_button_label: The label of the submit button.
+            submit_button_tooltip: The tooltip of the submit button.
+            submit_button_disabled: Whether the submit button should be disabled.
+            clear_on_submit: Whether the form should clear its contents after submitting.
+            show_clear_button: Whether the form should show a clear button.
+            clear_button_label: The label of the clear button.
+            clear_button_tooltip: The tooltip of the clear button.
+            validate: A function that takes the form's value and returns an error message if invalid,
+                or `None` if valid.
+            on_change: A callback that takes the form's value and returns an error message if invalid,
+                or `None` if valid.
         """
         from marimo._plugins.ui._impl.input import form as form_plugin
 
@@ -453,9 +452,12 @@ class UIElement(Html, Generic[S, T], metaclass=abc.ABCMeta):
         if self._on_change is not None:
             self._on_change(self._value)
 
-    def _on_update_completion(self) -> None:
-        """Callback to run after the kernel has processed a value update."""
-        return
+    def _on_update_completion(self) -> bool:
+        """Callback to run after the kernel has processed a value update.
+
+        Return true if the value of the component has changed, false otherwise
+        """
+        return False
 
     def __deepcopy__(self, memo: dict[int, Any]) -> UIElement[S, T]:
         # Custom deepcopy that excludes elements that can't be deepcopied
@@ -521,3 +523,8 @@ class UIElement(Html, Generic[S, T], metaclass=abc.ABCMeta):
             "probably want to call `.value` instead."
         )
         return True
+
+    def _repr_markdown_(self) -> str:
+        # When rendering to markdown, remove the marimo-ui-element tag
+        # and render the inner-text escaped.
+        return escape(self._inner_text)

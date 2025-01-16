@@ -23,6 +23,7 @@ from typing import (
     Union,
     cast,
 )
+from uuid import uuid4
 
 from marimo import _loggers as loggers
 from marimo._ast.app import _AppConfig
@@ -31,7 +32,12 @@ from marimo._data.models import ColumnSummary, DataTable, DataTableSource
 from marimo._dependencies.dependencies import DependencyManager
 from marimo._messaging.cell_output import CellChannel, CellOutput
 from marimo._messaging.completion_option import CompletionOption
-from marimo._messaging.errors import Error
+from marimo._messaging.context import RUN_ID_CTX, RunId_t
+from marimo._messaging.errors import (
+    Error,
+    MarimoInternalError,
+    is_sensitive_error,
+)
 from marimo._messaging.mimetypes import KnownMimeType
 from marimo._messaging.streams import OUTPUT_MAX_BYTES
 from marimo._messaging.types import Stream
@@ -39,7 +45,9 @@ from marimo._output.hypertext import Html
 from marimo._plugins.core.json_encoder import WebComponentEncoder
 from marimo._plugins.core.web_component import JSONType
 from marimo._plugins.ui._core.ui_element import UIElement
+from marimo._plugins.ui._impl.tables.utils import get_table_manager_or_none
 from marimo._runtime.context import get_context
+from marimo._runtime.context.utils import get_mode
 from marimo._runtime.layout.layout import LayoutConfig
 from marimo._utils.platform import is_pyodide, is_windows
 
@@ -47,6 +55,9 @@ LOGGER = loggers.marimo_logger()
 
 
 def serialize(datacls: Any) -> Dict[str, JSONType]:
+    # TODO(akshayka): maybe serialize as bytes (JSON), not objects ...,
+    # then `send_bytes` over connection ... to try to avoid pickling
+    # issues
     try:
         # Try to serialize as a dataclass
         return cast(
@@ -57,7 +68,7 @@ def serialize(datacls: Any) -> Dict[str, JSONType]:
         # If that fails, try to serialize using the WebComponentEncoder
         return cast(
             Dict[str, JSONType],
-            json.loads(json.dumps(datacls, cls=WebComponentEncoder)),
+            json.loads(WebComponentEncoder.json_dumps(datacls)),
         )
 
 
@@ -96,13 +107,14 @@ class Op:
 class CellOp(Op):
     """Op to transition a cell.
 
-    A CellOp's data has three optional fields:
+    A CellOp's data has some optional fields:
 
     output       - a CellOutput
     console      - a CellOutput (console msg to append), or a list of
                    CellOutputs
     status       - execution status
     stale_inputs - whether the cell has stale inputs (variables, modules, ...)
+    run_id       - the run associated with this cell.
 
     Omitting a field means that its value should be unchanged!
 
@@ -117,7 +129,27 @@ class CellOp(Op):
     console: Optional[Union[CellOutput, List[CellOutput]]] = None
     status: Optional[RuntimeStateType] = None
     stale_inputs: Optional[bool] = None
+    run_id: Optional[RunId_t] = None
     timestamp: float = field(default_factory=lambda: time.time())
+
+    def __post_init__(self) -> None:
+        if self.run_id is not None:
+            return
+
+        # We currently don't support tracing for replayed cell ops (previous session runs)
+        if self.status == "idle":
+            self.run_id = None
+            return
+
+        try:
+            self.run_id = RUN_ID_CTX.get()
+        except LookupError:
+            # Be specific about the exception we're catching
+            # The context variable hasn't been set yet
+            self.run_id = None
+        except Exception as e:
+            LOGGER.error("Error getting run id: %s", str(e))
+            self.run_id = None
 
     @staticmethod
     def maybe_truncate_output(
@@ -144,7 +176,7 @@ class CellOp(Op):
 
                 Increasing the max output size may cause performance issues.
                 If you run into problems, please reach out
-                to us on [Discord](https://discord.gg/JE7nhX6mD8) or
+                to us on [Discord](https://marimo.io/discord?ref=app) or
                 [GitHub](https://github.com/marimo-team/marimo/issues).
                 """
 
@@ -244,12 +276,32 @@ class CellOp(Op):
         cell_id: CellId_t,
     ) -> None:
         console: Optional[list[CellOutput]] = [] if clear_console else None
+
+        # In run mode, we don't want to broadcast the error. Instead we want to print the error to the console
+        # and then broadcast a new error such that the data is hidden.
+        safe_errors: list[Error] = []
+        if get_mode() == "run":
+            for error in data:
+                # Skip non-sensitive errors
+                if not is_sensitive_error(error):
+                    safe_errors.append(error)
+                    continue
+
+                error_id = uuid4()
+                LOGGER.error(
+                    f"(error_id={error_id}) {error.describe()}",
+                    extra={"error_id": error_id},
+                )
+                safe_errors.append(MarimoInternalError(error_id=str(error_id)))
+        else:
+            safe_errors = list(data)
+
         CellOp(
             cell_id=cell_id,
             output=CellOutput(
                 channel=CellChannel.MARIMO_ERROR,
                 mimetype="application/vnd.marimo+error",
-                data=data,
+                data=safe_errors,
             ),
             console=console,
             status=None,
@@ -280,6 +332,19 @@ class FunctionCallResult(Op):
     function_call_id: str
     return_value: JSONType
     status: HumanReadableStatus
+
+    def __post_init__(self) -> None:
+        # We want to serialize the return_value using our custom JSON encoder
+        try:
+            self.return_value = json.loads(
+                WebComponentEncoder.json_dumps(self.return_value)
+            )
+        except Exception as e:
+            LOGGER.exception(
+                "Error serializing function call result %s: %s",
+                self.__class__.__name__,
+                e,
+            )
 
     def serialize(self) -> dict[str, Any]:
         try:
@@ -468,6 +533,14 @@ class VariableValue:
 
     def _stringify(self, value: object) -> str:
         try:
+            # HACK: We pretty-print tables to avoid str(ibis_table)
+            # which can be very slow when `ibis.options.interactive = True`
+            table_manager = get_table_manager_or_none(value)
+            if table_manager is not None:
+                return str(table_manager)
+            else:
+                return str(value)[:50]
+
             return str(value)[:50]
         except BaseException:
             # Catch-all: some libraries like Polars have bugs and raise
@@ -566,6 +639,9 @@ class UpdateCellCodes(Op):
     name: ClassVar[str] = "update-cell-codes"
     cell_ids: List[CellId_t]
     codes: List[str]
+    # If true, this means the code was not run on the backend when updating
+    # the cell codes.
+    code_is_stale: bool
 
 
 @dataclass

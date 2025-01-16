@@ -28,7 +28,7 @@ async def test_all_smoke_tests() -> None:
 
     semaphore = asyncio.Semaphore(CONCURRENT_TESTS)
     tasks = [
-        _run_test(file, root, smoke_test_config, semaphore)
+        _run_test(file, root, smoke_test_config, semaphore, with_uv=False)
         for file in all_py_paths
     ]
     await asyncio.gather(*tasks)
@@ -46,7 +46,7 @@ async def test_all_examples() -> None:
 
     semaphore = asyncio.Semaphore(CONCURRENT_TESTS)
     tasks = [
-        _run_test(file, root, smoke_test_config, semaphore)
+        _run_test(file, root, smoke_test_config, semaphore, with_uv=True)
         for file in all_py_paths
     ]
     await asyncio.gather(*tasks)
@@ -57,6 +57,7 @@ async def _run_test(
     root: str,
     smoke_test_config: Dict[str, Any],
     semaphore: asyncio.Semaphore,
+    with_uv: bool,
 ) -> None:
     async with semaphore:
         relative_file = str(file.relative_to(root))
@@ -75,31 +76,32 @@ async def _run_test(
             if "marimo.App(" not in content:
                 return
 
+        executable = "uv run" if with_uv else "python"
         process, stdout, stderr = await Cmd(
-            f"python {file}", timeout=15, input_data=input_data
+            f"{executable} {file}", timeout=15, input_data=input_data
         ).run()
 
         if failed_reason:
             # Expecting an error
-            assert (
-                process.returncode != 0
-            ), f"{relative_file} Expected error: {failed_reason}"
+            assert process.returncode != 0, (
+                f"{relative_file} Expected error: {failed_reason}"
+            )
             if isinstance(failed_reason, list):
-                assert any(
-                    reason in stderr for reason in failed_reason
-                ), f"File: {file}. Expected error one of {failed_reason} in {stderr}"  # noqa: E501
+                assert any(reason in stderr for reason in failed_reason), (
+                    f"File: {file}. Expected error one of {failed_reason} in {stderr}"
+                )  # noqa: E501
             else:
                 assert failed_reason in stderr, f"File: {file}"
         # Allow MarimoStop
         elif "MarimoStop" in stderr:
-            assert (
-                process.returncode != 0
-            ), f"{relative_file} Unexpected error: {stderr}"
+            assert process.returncode != 0, (
+                f"{relative_file} Unexpected error: {stderr}"
+            )
         else:
             # Expecting no error, allow MarimoStop
-            assert (
-                process.returncode == 0
-            ), f"{relative_file} Unexpected error: {stderr}"
+            assert process.returncode == 0, (
+                f"{relative_file} Unexpected error: {stderr}"
+            )
             assert not any(
                 line.startswith("Traceback") for line in stderr.splitlines()
             )

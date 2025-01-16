@@ -37,12 +37,12 @@ class APIRouter(Router):
 
     def __post_init__(self) -> None:
         if self.prefix:
-            assert self.prefix.startswith(
-                "/"
-            ), "Path prefix must start with '/'"
-            assert not self.prefix.endswith(
-                "/"
-            ), "Path prefix must not end with '/'"
+            assert self.prefix.startswith("/"), (
+                "Path prefix must start with '/'"
+            )
+            assert not self.prefix.endswith("/"), (
+                "Path prefix must not end with '/'"
+            )
 
     def post(
         self, path: str
@@ -61,6 +61,8 @@ class APIRouter(Router):
                 if isinstance(response, PlainTextResponse):
                     return response
                 if isinstance(response, RedirectResponse):
+                    return response
+                if isinstance(response, JSONResponse):
                     return response
 
                 if dataclasses.is_dataclass(response):

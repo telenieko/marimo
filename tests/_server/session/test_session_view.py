@@ -10,6 +10,8 @@ from marimo._messaging.cell_output import CellChannel, CellOutput
 from marimo._messaging.ops import (
     CellOp,
     Datasets,
+    UpdateCellCodes,
+    UpdateCellIdsRequest,
     VariableDeclaration,
     Variables,
     VariableValue,
@@ -40,6 +42,20 @@ updated_output = CellOutput(
 
 initial_status: RuntimeStateType = "running"
 updated_status: RuntimeStateType = "running"
+
+
+def test_cell_ids() -> None:
+    session_view = SessionView()
+    assert session_view.cell_ids is None
+
+    session_view.add_operation(
+        UpdateCellIdsRequest(
+            cell_ids=[cell_id],
+        )
+    )
+    operation = session_view.operations[0]
+    assert isinstance(operation, UpdateCellIdsRequest)
+    assert operation.cell_ids == [cell_id]
 
 
 def test_session_view_cell_op() -> None:
@@ -150,6 +166,7 @@ def test_ui_values() -> None:
             set_ui_element_value_request=SetUIElementValueRequest.from_ids_and_values(
                 [("test_ui3", 101112)]
             ),
+            auto_run=True,
         )
     )
     assert "test_ui3" in session_view.ui_values
@@ -184,6 +201,7 @@ def test_last_run_code() -> None:
             set_ui_element_value_request=SetUIElementValueRequest.from_ids_and_values(
                 []
             ),
+            auto_run=True,
         )
     )
     assert session_view.last_executed_code[cell_id] == "print('hello')"
@@ -249,6 +267,7 @@ def test_add_datasets() -> None:
                                 name="col1",
                                 type="boolean",
                                 external_type="BOOL",
+                                sample_values=["true", "false"],
                             )
                         ],
                         num_rows=1,
@@ -263,7 +282,8 @@ def test_add_datasets() -> None:
                             DataTableColumn(
                                 name="col2",
                                 type="integer",
-                                external_type="BOOL",
+                                external_type="INT",
+                                sample_values=["1", "2"],
                             )
                         ],
                         num_rows=2,
@@ -295,6 +315,7 @@ def test_add_datasets() -> None:
                                 name="new_col",
                                 type="boolean",
                                 external_type="BOOL",
+                                sample_values=["true", "false"],
                             )
                         ],
                         num_rows=20,
@@ -604,3 +625,74 @@ def test_get_cell_console_outputs(time_mock: Any) -> None:
         cell_id: [CellOutput.stdout("one"), CellOutput.stdout("two")],
         cell_2_id: [CellOutput.stdout("two")],
     }
+
+
+def test_mark_auto_export():
+    session_view = SessionView()
+    assert not session_view.has_auto_exported_html
+    assert not session_view.has_auto_exported_md
+
+    session_view.mark_auto_export_html()
+    assert session_view.has_auto_exported_html
+
+    session_view.mark_auto_export_md()
+    assert session_view.has_auto_exported_md
+
+    session_view._touch()
+    assert not session_view.has_auto_exported_html
+    assert not session_view.has_auto_exported_md
+
+    session_view.mark_auto_export_html()
+    session_view.mark_auto_export_md()
+    session_view.add_operation(
+        CellOp(
+            cell_id=cell_id,
+            output=initial_output,
+            status=initial_status,
+        ),
+    )
+    assert not session_view.has_auto_exported_html
+    assert not session_view.has_auto_exported_md
+
+
+def test_stale_code() -> None:
+    """Test that stale code is properly tracked and included in operations."""
+    session_view = SessionView()
+    assert session_view.stale_code is None
+
+    # Add stale code operation
+    stale_code_op = UpdateCellCodes(
+        cell_ids=["cell1"],
+        codes=["print('hello')"],
+        code_is_stale=True,
+    )
+    session_view.add_operation(stale_code_op)
+
+    # Verify stale code is tracked
+    assert session_view.stale_code == stale_code_op
+    assert session_view.stale_code in session_view.operations
+
+    # Add non-stale code operation
+    non_stale_code_op = UpdateCellCodes(
+        cell_ids=["cell2"],
+        codes=["print('world')"],
+        code_is_stale=False,
+    )
+    session_view.add_operation(non_stale_code_op)
+
+    # Verify non-stale code doesn't affect stale_code tracking
+    assert session_view.stale_code == stale_code_op
+    assert session_view.stale_code in session_view.operations
+
+    # Update stale code
+    new_stale_code_op = UpdateCellCodes(
+        cell_ids=["cell3"],
+        codes=["print('updated')"],
+        code_is_stale=True,
+    )
+    session_view.add_operation(new_stale_code_op)
+
+    # Verify stale code is updated
+    assert session_view.stale_code == new_stale_code_op
+    assert session_view.stale_code in session_view.operations
+    assert stale_code_op not in session_view.operations

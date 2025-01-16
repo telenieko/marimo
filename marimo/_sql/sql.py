@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 from marimo._dependencies.dependencies import DependencyManager
 from marimo._output.rich_help import mddoc
-from marimo._plugins.ui._impl import table
-from marimo._runtime import output
+from marimo._runtime.context.types import (
+    ContextNotInitializedError,
+    get_context,
+)
+from marimo._runtime.output import replace
+
+if TYPE_CHECKING:
+    import duckdb
 
 
 def get_default_result_limit() -> Optional[int]:
@@ -18,6 +24,7 @@ def get_default_result_limit() -> Optional[int]:
 @mddoc
 def sql(
     query: str,
+    output: bool = True,
 ) -> Any:
     """
     Execute a SQL query.
@@ -25,19 +32,18 @@ def sql(
     This uses duckdb to execute the query. Any dataframes in the global
     namespace can be used inside the query.
 
-    The result of the query is displayed in the UI.
+    The result of the query is displayed in the UI if output is True.
 
     Args:
         query: The SQL query to execute.
+        output: Whether to display the result in the UI. Defaults to True.
 
     Returns:
         The result of the query.
     """
     DependencyManager.duckdb.require("to execute sql")
 
-    import duckdb  # type: ignore[import-not-found,import-untyped,unused-ignore] # noqa: E501
-
-    relation = duckdb.sql(query=query)
+    relation = _wrapped_sql(query)
 
     if not relation:
         return None
@@ -79,22 +85,26 @@ def sql(
     else:
         raise ModuleNotFoundError(
             "pandas or polars is required to execute sql. "
-            + "You can install them with 'pip install pandas polars'"
+            + "You can install them with 'pip install pandas polars'",
+            name="polars",
         )
 
-    t = table.table(
-        df,
-        selection=None,
-        page_size=5,
-        pagination=True,
-        _internal_total_rows=custom_total_count,
-    )
-    output.replace(t)
+    if output:
+        from marimo._plugins.ui._impl import table
+
+        t = table.table(
+            df,
+            selection=None,
+            page_size=5,
+            pagination=True,
+            _internal_total_rows=custom_total_count,
+        )
+        replace(t)
     return df
 
 
 def _query_includes_limit(query: str) -> bool:
-    import duckdb  # type: ignore[import-not-found,import-untyped,unused-ignore] # noqa: E501
+    import duckdb
 
     try:
         statements = duckdb.extract_statements(query.strip())
@@ -111,3 +121,25 @@ def _query_includes_limit(query: str) -> bool:
         "LIMIT " in last_statement.query.upper()
         or "LIMIT\n" in last_statement.query.upper()
     )
+
+
+def _wrapped_sql(query: str) -> "duckdb.DuckDBPyRelation":
+    import duckdb
+
+    # In Python globals() are scoped to modules; since this function
+    # is in a different module than user code, globals() doesn't return
+    # the kernel globals, it just returns this module's global namespace.
+    #
+    # However, duckdb needs access to the kernel's globals. For this reason,
+    # we manually exec duckdb and provide it with the kernel's globals.
+    try:
+        ctx = get_context()
+    except ContextNotInitializedError:
+        relation = duckdb.sql(query=query)
+    else:
+        relation = eval(
+            "duckdb.sql(query=query)",
+            ctx.globals,
+            {"query": query, "duckdb": duckdb},
+        )
+    return relation

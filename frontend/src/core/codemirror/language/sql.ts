@@ -19,6 +19,7 @@ import {
   upgradePrefixKind,
 } from "./utils/quotes";
 import { capabilitiesAtom } from "@/core/config/capabilities";
+import { MarkdownLanguageAdapter } from "./markdown";
 
 const quoteKinds = [
   ['"""', '"""'],
@@ -35,11 +36,11 @@ const pairs = QUOTE_PREFIX_KINDS.flatMap((prefix) =>
 
 const regexes = pairs.map(
   ([start, end]) =>
-    // df = mo.sql( space + start + capture + space + end)
+    // df = mo.sql( space + start + capture + space + end, optional output flag)
     [
       start,
       new RegExp(
-        `^(?<dataframe>\\w*)\\s*=\\s*mo\\.sql\\(\\s*${start}(?<sql>.*)${end}\\s*\\)$`,
+        `^(?<dataframe>\\w*)\\s*=\\s*mo\\.sql\\(\\s*${start}(?<sql>.*)${end}\\s*(?:,\\s*output\\s*=\\s*(?<output>True|False),?)?\\s*\\)$`,
         "s",
       ),
     ] as const,
@@ -51,13 +52,19 @@ const regexes = pairs.map(
 export class SQLLanguageAdapter implements LanguageAdapter {
   readonly type = "sql";
   readonly defaultCode = `_df = mo.sql(f"""SELECT * FROM """)`;
+  static fromQuery = (query: string) => `_df = mo.sql(f"""${query.trim()}""")`;
 
   dataframeName = "_df";
   lastQuotePrefix: QuotePrefixKind = "f";
+  showOutput = true;
 
   transformIn(pythonCode: string): [string, number] {
     if (!this.isSupported(pythonCode)) {
-      throw new Error("Not supported");
+      // Attempt to remove any markdown wrappers
+      const [transformedCode, offset] =
+        new MarkdownLanguageAdapter().transformIn(pythonCode);
+      // Just return the original code
+      return [transformedCode, offset];
     }
 
     pythonCode = pythonCode.trim();
@@ -65,6 +72,7 @@ export class SQLLanguageAdapter implements LanguageAdapter {
     // Handle empty strings
     if (pythonCode === "") {
       this.lastQuotePrefix = "f";
+      this.showOutput = true;
       return ["", 0];
     }
 
@@ -73,11 +81,13 @@ export class SQLLanguageAdapter implements LanguageAdapter {
       if (match) {
         const dataframe = match.groups?.dataframe || this.dataframeName;
         const innerCode = match.groups?.sql || "";
+        const output = match.groups?.output;
 
         const [quotePrefix, quoteType] = splitQuotePrefix(start);
         // store the quote prefix for later when we transform out
         this.lastQuotePrefix = quotePrefix;
         this.dataframeName = dataframe;
+        this.showOutput = output === undefined ? true : output === "True";
         const unescapedCode = innerCode.replaceAll(`\\${quoteType}`, quoteType);
 
         const offset = pythonCode.indexOf(innerCode);
@@ -96,7 +106,7 @@ export class SQLLanguageAdapter implements LanguageAdapter {
     // Multiline code
     const start = `${this.dataframeName} = mo.sql(\n    ${prefix}"""\n`;
     const escapedCode = code.replaceAll('"""', String.raw`\"""`);
-    const end = `\n    """\n)`;
+    const end = `\n    """${this.showOutput ? "" : ",\n    output=False,"}\n)`;
     return [start + indentOneTab(escapedCode) + end, start.length + 1];
   }
 

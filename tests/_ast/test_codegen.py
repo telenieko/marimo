@@ -16,6 +16,7 @@ from marimo import __version__
 from marimo._ast import codegen, compiler
 from marimo._ast.app import App, InternalApp, _AppConfig
 from marimo._ast.cell import CellConfig
+from marimo._ast.names import is_internal_cell_name
 
 compile_cell = partial(compiler.compile_cell, cell_id="0")
 
@@ -71,7 +72,9 @@ class TestGeneration:
 
     @staticmethod
     def test_generate_filecontents_empty_with_config() -> None:
-        config = _AppConfig(app_title="test_title", width="full")
+        config = _AppConfig(
+            app_title="test_title", width="full", css_file=r"a\b.css"
+        )
         contents = wrap_generate_filecontents([], [], config=config)
         assert contents == get_expected_filecontents(
             "test_generate_filecontents_empty_with_config"
@@ -230,6 +233,48 @@ class TestGeneration:
             "test_generate_filecontents_shadowed_builtin"
         )
 
+    @staticmethod
+    def test_generate_app_constructor_with_auto_download() -> None:
+        config = _AppConfig(
+            width="full",
+            app_title="Test App",
+            css_file="custom.css",
+            auto_download=["html", "markdown"],
+        )
+        result = codegen.generate_app_constructor(config)
+        expected = (
+            "app = marimo.App(\n"
+            '    width="full",\n'
+            '    app_title="Test App",\n'
+            '    css_file="custom.css",\n'
+            '    auto_download=["html", "markdown"],\n'
+            ")"
+        )
+        assert result == expected
+
+    @staticmethod
+    def test_generate_app_constructor_with_empty_auto_download() -> None:
+        config = _AppConfig(auto_download=[])
+        result = codegen.generate_app_constructor(config)
+        assert result == "app = marimo.App()"
+
+    @staticmethod
+    def test_generate_app_constructor_with_single_auto_download() -> None:
+        config = _AppConfig(auto_download=["html"])
+        result = codegen.generate_app_constructor(config)
+        assert result == 'app = marimo.App(auto_download=["html"])'
+
+    @staticmethod
+    def test_generate_file_contents_overwrite_default_cell_names() -> None:
+        contents = wrap_generate_filecontents(
+            ["import numpy as np", "x = 0", "y = x + 1"],
+            ["is_named", "__", "__"],
+        )
+        # __9 and __10 are overwritten by the default names
+        assert "is_named" in contents
+        assert "def _" in contents
+        assert "def __" not in contents
+
 
 class TestGetCodes:
     @staticmethod
@@ -361,13 +406,26 @@ class TestGetCodes:
         )
         assert app is not None
         cell_manager = app._cell_manager
-        assert list(cell_manager.names()) == ["one", "two", "__", "__"]
+        assert list(cell_manager.names()) == ["one", "two", "_", "_"]
         assert list(cell_manager.codes()) == [
             "import numpy as np",
             "_ error",
             "'all good'",
             '_ another_error\n_ and """another"""\n\n    \\t',
         ]
+
+    @staticmethod
+    def test_get_codes_app_with_only_comments() -> None:
+        app = codegen.get_app(get_filepath("test_app_with_only_comments"))
+        assert app is None
+
+    @staticmethod
+    def test_get_codes_app_with_no_cells() -> None:
+        app = codegen.get_app(get_filepath("test_app_with_no_cells"))
+        assert app is not None
+        app._cell_manager.ensure_one_cell()
+        assert list(app._cell_manager.names()) == ["_"]
+        assert list(app._cell_manager.codes()) == [""]
 
 
 @pytest.fixture
@@ -398,7 +456,7 @@ class TestToFunctionDef:
         cell = compile_cell(code)
         fndef = codegen.to_functiondef(cell, "foo")
         expected = "\n".join(
-            ["@app.cell", "def foo():", "    x = 0", "    return x,"]
+            ["@app.cell", "def foo():", "    x = 0", "    return (x,)"]
         )
         assert fndef == expected
 
@@ -458,7 +516,7 @@ class TestToFunctionDef:
         cell = cell.configure(CellConfig())
         fndef = codegen.to_functiondef(cell, "foo")
         expected = "\n".join(
-            ["@app.cell", "def foo():", "    x = 0", "    return x,"]
+            ["@app.cell", "def foo():", "    x = 0", "    return (x,)"]
         )
         assert fndef == expected
 
@@ -472,7 +530,7 @@ class TestToFunctionDef:
                 "@app.cell(disabled=True)",
                 "def foo():",
                 "    x = 0",
-                "    return x,",
+                "    return (x,)",
             ]
         )
         assert fndef == expected
@@ -487,7 +545,7 @@ class TestToFunctionDef:
                 "@app.cell(disabled=True, hide_code=True)",
                 "def foo():",
                 "    x = 0",
-                "    return x,",
+                "    return (x,)",
             ]
         )
         assert fndef == expected
@@ -502,7 +560,7 @@ class TestToFunctionDef:
                 "@app.cell",
                 "def foo():",
                 "    x = 0",
-                "    return x,",
+                "    return (x,)",
             ]
         )
         assert fndef == expected
@@ -574,3 +632,11 @@ def test_sqls() -> None:
     cell = compile_cell(code)
     sqls = cell.sqls
     assert sqls == ["SELECT * FROM foo", "ATTACH TABLE bar"]
+
+
+def test_is_internal_cell_name() -> None:
+    assert is_internal_cell_name("__")
+    assert is_internal_cell_name("_")
+    assert not is_internal_cell_name("___")
+    assert not is_internal_cell_name("__1213123123")
+    assert not is_internal_cell_name("foo")

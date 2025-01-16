@@ -1,13 +1,13 @@
 # Miscellaneous
 
-```{eval-rst}
-.. autofunction:: marimo.running_in_notebook
-```
+::: marimo.running_in_notebook
 
-```{eval-rst}
-.. autofunction:: marimo.defs
-```
+::: marimo.defs
 
-```{eval-rst}
-.. autofunction:: marimo.refs
-```
+::: marimo.refs
+
+::: marimo.notebook_dir
+
+::: marimo.notebook_location
+
+::: marimo.Thread

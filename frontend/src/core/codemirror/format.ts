@@ -11,7 +11,7 @@ import {
   updateEditorCodeFromPython,
 } from "./language/utils";
 import { StateEffect } from "@codemirror/state";
-import { getUserConfig } from "../config/config";
+import { getResolvedMarimoConfig } from "../config/config";
 
 export const formattingChangeEffect = StateEffect.define<boolean>();
 
@@ -27,13 +27,13 @@ export async function formatEditorViews(
 
   const formatResponse = await sendFormat({
     codes,
-    lineLength: getUserConfig().formatting.line_length,
+    lineLength: getResolvedMarimoConfig().formatting.line_length,
   });
 
-  for (const [_cellId, formattedCode] of Objects.entries(
+  for (const [cellIdString, formattedCode] of Objects.entries(
     formatResponse.codes,
   )) {
-    const cellId = _cellId as CellId;
+    const cellId = cellIdString as CellId;
     const originalCode = codes[cellId];
     const view = views[cellId];
 

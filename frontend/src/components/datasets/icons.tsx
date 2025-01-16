@@ -6,8 +6,10 @@ import {
   CalendarIcon,
   HashIcon,
   TypeIcon,
-  ListOrderedIcon,
   type LucideIcon,
+  CalendarClockIcon,
+  ClockIcon,
+  CurlyBracesIcon,
 } from "lucide-react";
 
 /**
@@ -16,8 +18,10 @@ import {
 export const DATA_TYPE_ICON: Record<DataType, LucideIcon> = {
   boolean: ToggleLeftIcon,
   date: CalendarIcon,
+  time: ClockIcon,
+  datetime: CalendarClockIcon,
   number: HashIcon,
   string: TypeIcon,
-  integer: ListOrderedIcon,
-  unknown: TypeIcon,
+  integer: HashIcon,
+  unknown: CurlyBracesIcon,
 };

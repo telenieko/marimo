@@ -2,7 +2,7 @@
 // @ts-expect-error - no types
 import * as vl from "vega-loader";
 import type { DataFormat } from "./types";
-import type { DataType } from "@/core/kernel/messages";
+import type { DataType } from "./vega-loader";
 
 // Re-export the vega-loader functions to add TypeScript types
 
@@ -16,27 +16,38 @@ export function read<T = object>(
       }
     | {
         type: DataFormat["type"];
-        parse: FieldTypes;
+        parse: Record<string, DataType>;
       }
     | undefined,
 ): T[] {
   return vl.read(data, format);
 }
 
-export function createLoader(): {
-  load: (
-    url: string,
-  ) => Promise<
-    string | Record<string, unknown> | Array<Record<string, unknown>>
-  >;
-  http: (url: string) => Promise<string>;
-} {
+export interface Loader {
+  load(
+    uri: string,
+    options?: unknown,
+  ): Promise<string | Record<string, unknown> | Array<Record<string, unknown>>>;
+  sanitize(uri: string, options?: unknown): Promise<{ href: string }>;
+  http(uri: string, options?: unknown): Promise<string>;
+  file(filename: string): Promise<string>;
+}
+
+export function createLoader(): Loader {
   return vl.loader();
 }
 
-export type FieldTypes = Record<string, DataType>;
+export type VegaDataType =
+  | "boolean"
+  | "integer"
+  | "number"
+  | "date"
+  | "string"
+  | "unknown";
 
-export const typeParsers: Record<DataType, (value: string) => unknown> =
+export type FieldTypes = Record<string, VegaDataType>;
+
+export const typeParsers: Record<VegaDataType, (value: string) => unknown> =
   vl.typeParsers;
 
 export type { DataType } from "@/core/kernel/messages";
