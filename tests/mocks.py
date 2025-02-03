@@ -4,6 +4,7 @@ import difflib
 import os
 from typing import Callable
 
+from marimo import __version__
 from marimo._utils.paths import maybe_make_dirs
 
 
@@ -18,10 +19,15 @@ def snapshotter(current_file: str) -> Callable[[str, str], None]:
     but the snapshot will be updated with the new result.
     """
 
-    def snapshot(filename: str, result: str) -> None:
+    def snapshot(
+        filename: str, result: str, keep_version: bool = False
+    ) -> None:
         filepath = os.path.join(
             os.path.dirname(current_file), "snapshots", filename
         )
+
+        if not keep_version:
+            result = _sanitize_version(result)
 
         # If snapshot directory doesn't exist, create it
         maybe_make_dirs(filepath)
@@ -52,14 +58,14 @@ def snapshotter(current_file: str) -> Callable[[str, str], None]:
         if is_json:
             import json
 
-            expected = json.loads(expected)
-            result = json.loads(result)
+            expected_json = json.loads(expected)
+            result_json = json.loads(result)
 
-            if expected != result:
+            if expected_json != result_json:
                 write_result()
                 print("Snapshot updated")
 
-            assert expected == result
+            assert expected_json == result_json
         else:
             text_diff = "\n".join(
                 list(
@@ -78,3 +84,9 @@ def snapshotter(current_file: str) -> Callable[[str, str], None]:
             assert result == expected, f"Snapshot differs:\n{text_diff}"
 
     return snapshot
+
+
+def _sanitize_version(output: str) -> str:
+    return output.replace(f"{__version__} (editable)", "0.0.0").replace(
+        f"{__version__}", "0.0.0"
+    )

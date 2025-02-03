@@ -43,6 +43,12 @@ import { LazyPlugin } from "./layout/LazyPlugin";
 import { NavigationMenuPlugin } from "@/plugins/layout/NavigationMenuPlugin";
 import { initializeSidebarElement } from "./core/sidebar-element";
 import { RoutesPlugin } from "./layout/RoutesPlugin";
+import { DateTimePickerPlugin } from "./impl/DateTimePickerPlugin";
+import { DateRangePickerPlugin } from "./impl/DateRangePlugin";
+import { MimeRendererPlugin } from "./layout/MimeRenderPlugin";
+import { ChatPlugin } from "./impl/chat/ChatPlugin";
+import { DataEditorPlugin } from "./impl/DataEditorPlugin";
+import { PanelPlugin } from "./impl/panel/PanelPlugin";
 
 // List of UI plugins
 export const UI_PLUGINS: Array<IPlugin<any, unknown>> = [
@@ -50,6 +56,8 @@ export const UI_PLUGINS: Array<IPlugin<any, unknown>> = [
   new CheckboxPlugin(),
   DataTablePlugin,
   new DatePickerPlugin(),
+  new DateTimePickerPlugin(),
+  new DateRangePickerPlugin(),
   new DictPlugin(),
   new CodeEditorPlugin(),
   new DropdownPlugin(),
@@ -69,10 +77,14 @@ export const UI_PLUGINS: Array<IPlugin<any, unknown>> = [
   new TextInputPlugin(),
   new VegaPlugin(),
   new PlotlyPlugin(),
+  ChatPlugin,
   DataExplorerPlugin,
   DataFramePlugin,
   LazyPlugin,
+  DownloadPlugin,
   AnyWidgetPlugin,
+  DataEditorPlugin,
+  PanelPlugin,
 ];
 
 // List of output / layout plugins
@@ -80,8 +92,8 @@ const LAYOUT_PLUGINS: Array<IStatelessPlugin<unknown>> = [
   new AccordionPlugin(),
   new CalloutPlugin(),
   new CarouselPlugin(),
-  new DownloadPlugin(),
   new JsonOutputPlugin(),
+  new MimeRendererPlugin(),
   new MermaidPlugin(),
   new NavigationMenuPlugin(),
   new ProgressPlugin(),

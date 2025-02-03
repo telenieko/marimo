@@ -22,6 +22,9 @@ from marimo._runtime import handlers, patches, requests
 from marimo._runtime.context.kernel_context import initialize_kernel_context
 from marimo._runtime.input_override import input_override
 from marimo._runtime.marimo_pdb import MarimoPdb
+from marimo._runtime.packages.pypi_package_manager import (
+    MicropipPackageManager,
+)
 from marimo._runtime.requests import (
     AppMetadata,
     CodeCompletionRequest,
@@ -122,7 +125,7 @@ class PyodideSession:
             consumer(msg)
 
     async def start(self) -> None:
-        self.kernel_task = launch_pyodide_kernel(
+        self.kernel_task = _launch_pyodide_kernel(
             control_queue=self._queue_manager.control_queue,
             set_ui_element_queue=self._queue_manager.set_ui_element_queue,
             completion_queue=self._queue_manager.completion_queue,
@@ -147,6 +150,20 @@ class PyodideSession:
 
     def put_input(self, text: str) -> None:
         self._queue_manager.input_queue.put_nowait(text)
+
+    def find_packages(self, code: str) -> list[str]:
+        """
+        Find the packages in the code based on the imports,
+        and mapping from module names to package names.
+        """
+        import pyodide.code  # type: ignore
+
+        imports: list[str] = pyodide.code.find_imports(code)  # type: ignore
+        if not isinstance(imports, list):
+            return []
+
+        package_manager = MicropipPackageManager()
+        return [package_manager.module_to_package(im) for im in imports]
 
 
 class PyodideBridge:
@@ -297,7 +314,7 @@ class PyodideBridge:
         return json.dumps(md)
 
 
-def launch_pyodide_kernel(
+def _launch_pyodide_kernel(
     control_queue: asyncio.Queue[ControlRequest],
     set_ui_element_queue: asyncio.Queue[SetUIElementValueRequest],
     completion_queue: asyncio.Queue[CodeCompletionRequest],
@@ -328,6 +345,11 @@ def launch_pyodide_kernel(
     stdin = PyodideStdin(stream) if is_edit_mode else None
     debugger = MarimoPdb(stdout=stdout, stdin=stdin) if is_edit_mode else None
 
+    def _enqueue_control_request(req: ControlRequest) -> None:
+        control_queue.put_nowait(req)
+        if isinstance(req, SetUIElementValueRequest):
+            set_ui_element_queue.put_nowait(req)
+
     kernel = Kernel(
         cell_configs=configs,
         app_metadata=app_metadata,
@@ -336,24 +358,25 @@ def launch_pyodide_kernel(
         stderr=stderr,
         stdin=stdin,
         module=patches.patch_main_module(
-            file=app_metadata.filename, input_override=input_override
+            file=app_metadata.filename,
+            input_override=input_override,
+            print_override=None,
         ),
-        enqueue_control_request=lambda req: control_queue.put_nowait(req),
+        enqueue_control_request=_enqueue_control_request,
         debugger_override=debugger,
         user_config=user_config,
     )
-    initialize_kernel_context(
+    ctx = initialize_kernel_context(
         kernel=kernel,
         stream=stream,
         stdout=stdout,
         stderr=stderr,
         virtual_files_supported=False,
+        mode=SessionMode.EDIT if is_edit_mode else SessionMode.RUN,
     )
 
     if is_edit_mode:
-        signal.signal(
-            signal.SIGINT, handlers.construct_interrupt_handler(kernel)
-        )
+        signal.signal(signal.SIGINT, handlers.construct_interrupt_handler(ctx))
 
     ui_element_request_mgr = SetUIElementRequestManager(set_ui_element_queue)
 

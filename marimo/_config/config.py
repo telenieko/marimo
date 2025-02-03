@@ -4,12 +4,15 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
+from marimo._config.packages import infer_package_manager
+from marimo._config.utils import deep_copy
+
 if sys.version_info < (3, 11):
     from typing_extensions import NotRequired
 else:
     from typing import NotRequired
 
-from typing import Any, Dict, Literal, Optional, TypedDict, Union, cast
+from typing import Any, Dict, List, Literal, Optional, TypedDict, Union, cast
 
 from marimo._output.rich_help import mddoc
 from marimo._utils.deep_merge import deep_merge
@@ -54,7 +57,7 @@ class SaveConfig(TypedDict):
 
 @mddoc
 @dataclass
-class KeymapConfig(TypedDict, total=False):
+class KeymapConfig(TypedDict):
     """Configuration for keymaps.
 
     **Keys.**
@@ -64,7 +67,7 @@ class KeymapConfig(TypedDict, total=False):
     """
 
     preset: Literal["default", "vim"]
-    overrides: Dict[str, str]
+    overrides: NotRequired[Dict[str, str]]
 
 
 OnCellChangeType = Literal["lazy", "autorun"]
@@ -101,6 +104,7 @@ class RuntimeConfig(TypedDict):
 # TODO(akshayka): remove normal, migrate to compact
 # normal == compact
 WidthType = Literal["normal", "compact", "medium", "full"]
+Theme = Literal["light", "dark", "system"]
 
 
 @mddoc
@@ -116,7 +120,7 @@ class DisplayConfig(TypedDict):
     - `dataframes`: `"rich"` or `"plain"`
     """
 
-    theme: Literal["light", "dark", "system"]
+    theme: Theme
     code_editor_font_size: int
     cell_output: Literal["above", "below"]
     default_width: WidthType
@@ -165,31 +169,75 @@ class PackageManagementConfig(TypedDict):
 
 
 @dataclass
-class AiConfig(TypedDict):
+class AiConfig(TypedDict, total=False):
     """Configuration options for AI.
 
     **Keys.**
 
+    - `rules`: custom rules to include in all AI completion prompts
     - `open_ai`: the OpenAI config
+    - `anthropic`: the Anthropic config
+    - `google`: the Google AI config
     """
 
+    rules: NotRequired[str]
     open_ai: OpenAiConfig
+    anthropic: AnthropicConfig
+    google: GoogleAiConfig
 
 
 @dataclass
-class OpenAiConfig(TypedDict):
+class OpenAiConfig(TypedDict, total=False):
     """Configuration options for OpenAI or OpenAI-compatible services.
 
     **Keys.**
 
     - `api_key`: the OpenAI API key
-    - `model`: the model to use
+    - `model`: the model to use.
+        if model starts with `claude-` we use the AnthropicConfig
     - `base_url`: the base URL for the API
     """
 
     api_key: str
     model: NotRequired[str]
     base_url: NotRequired[str]
+
+
+@dataclass
+class AnthropicConfig(TypedDict, total=False):
+    """Configuration options for Anthropic.
+
+    **Keys.**
+
+    - `api_key`: the Anthropic
+    """
+
+    api_key: str
+
+
+@dataclass
+class GoogleAiConfig(TypedDict, total=False):
+    """Configuration options for Google AI.
+
+    **Keys.**
+
+    - `api_key`: the Google AI API key
+    """
+
+    api_key: str
+
+
+@dataclass
+class SnippetsConfig(TypedDict):
+    """Configuration for snippets.
+
+    **Keys.**
+
+    - `custom_path`: the path to the custom snippets directory
+    """
+
+    custom_paths: NotRequired[List[str]]
+    include_default_snippets: NotRequired[bool]
 
 
 @mddoc
@@ -207,6 +255,25 @@ class MarimoConfig(TypedDict):
     package_management: PackageManagementConfig
     ai: NotRequired[AiConfig]
     experimental: NotRequired[Dict[str, Any]]
+    snippets: NotRequired[SnippetsConfig]
+
+
+@mddoc
+@dataclass
+class PartialMarimoConfig(TypedDict, total=False):
+    """Partial configuration for the marimo editor"""
+
+    completion: CompletionConfig
+    display: DisplayConfig
+    formatting: FormattingConfig
+    keymap: KeymapConfig
+    runtime: RuntimeConfig
+    save: SaveConfig
+    server: ServerConfig
+    package_management: PackageManagementConfig
+    ai: NotRequired[AiConfig]
+    experimental: NotRequired[Dict[str, Any]]
+    snippets: SnippetsConfig
 
 
 DEFAULT_CONFIG: MarimoConfig = {
@@ -230,28 +297,34 @@ DEFAULT_CONFIG: MarimoConfig = {
         "autosave_delay": 1000,
         "format_on_save": False,
     },
-    "package_management": {"manager": "pip"},
+    "package_management": {"manager": infer_package_manager()},
     "server": {
         "browser": "default",
         "follow_symlink": False,
     },
+    "snippets": {
+        "custom_paths": [],
+        "include_default_snippets": True,
+    },
 }
 
 
-def merge_default_config(config: MarimoConfig) -> MarimoConfig:
+def merge_default_config(
+    config: PartialMarimoConfig | MarimoConfig,
+) -> MarimoConfig:
     """Merge a user configuration with the default configuration."""
     return merge_config(DEFAULT_CONFIG, config)
 
 
 def merge_config(
-    config: MarimoConfig, new_config: MarimoConfig
+    config: MarimoConfig, new_config: PartialMarimoConfig | MarimoConfig
 ) -> MarimoConfig:
     """Merge a user configuration with a new configuration."""
     # Remove the keymap overrides from the incoming config,
     # so that they don't get merged into the new config
     if new_config.get("keymap", {}).get("overrides") is not None:
         # Clone config to avoid modifying the original
-        config = _deep_copy(config)
+        config = deep_copy(config)
         config.get("keymap", {}).pop("overrides", {})
 
     merged = cast(
@@ -262,66 +335,18 @@ def merge_config(
     )
 
     # Patches for backward compatibility
-    if (
-        merged["runtime"]["auto_reload"] is False  # type:ignore[comparison-overlap]
-    ):
-        merged["runtime"]["auto_reload"] = "off"
-    if (
-        merged["runtime"]["auto_reload"] is True  # type:ignore[comparison-overlap]
-    ):
-        merged["runtime"]["auto_reload"] = "lazy"
-    if (
-        merged["runtime"]["auto_reload"] == "detect"  # type:ignore[comparison-overlap]
-    ):
-        merged["runtime"]["auto_reload"] = "lazy"
+    if "runtime" in merged:
+        if (
+            merged["runtime"].get("auto_reload") is False  # type:ignore[comparison-overlap]
+        ):
+            merged["runtime"]["auto_reload"] = "off"
+        elif (
+            merged["runtime"].get("auto_reload") is True  # type:ignore[comparison-overlap]
+        ):
+            merged["runtime"]["auto_reload"] = "lazy"
+        elif (
+            merged["runtime"].get("auto_reload") == "detect"  # type:ignore[comparison-overlap]
+        ):
+            merged["runtime"]["auto_reload"] = "lazy"
 
     return merged
-
-
-def _deep_copy(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        return {k: _deep_copy(v) for k, v in obj.items()}  # type: ignore
-    if isinstance(obj, list):
-        return [_deep_copy(v) for v in obj]  # type: ignore
-    return obj
-
-
-SECRET_PLACEHOLDER = "********"
-
-
-def mask_secrets(config: MarimoConfig) -> MarimoConfig:
-    def deep_remove_from_path(path: list[str], obj: Dict[str, Any]) -> None:
-        key = path[0]
-        if key not in obj:
-            return
-        if len(path) == 1:
-            if obj[key]:
-                obj[key] = SECRET_PLACEHOLDER
-        else:
-            deep_remove_from_path(path[1:], cast(Dict[str, Any], obj[key]))
-
-    secrets = [["ai", "open_ai", "api_key"]]
-
-    new_config = _deep_copy(config)
-    for secret in secrets:
-        deep_remove_from_path(secret, cast(Dict[str, Any], new_config))
-
-    return new_config  # type: ignore
-
-
-def remove_secret_placeholders(config: MarimoConfig) -> MarimoConfig:
-    def deep_remove(obj: Any) -> Any:
-        if isinstance(obj, dict):
-            # Filter all keys with value SECRET_PLACEHOLDER
-            return {
-                k: deep_remove(v)
-                for k, v in obj.items()
-                if v != SECRET_PLACEHOLDER
-            }  # type: ignore
-        if isinstance(obj, list):
-            return [deep_remove(v) for v in obj]  # type: ignore
-        if obj == SECRET_PLACEHOLDER:
-            return None
-        return obj
-
-    return deep_remove(_deep_copy(config))  # type: ignore

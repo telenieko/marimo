@@ -1,8 +1,11 @@
 # Copyright 2024 Marimo. All rights reserved.
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+import time
+from typing import TYPE_CHECKING, Any
 
+from marimo._utils.lists import first
 from tests._server.conftest import get_session_manager
 from tests._server.mocks import token_header, with_read_session, with_session
 
@@ -41,6 +44,23 @@ class TestExecutionRoutes_EditMode:
             json={
                 "object_ids": ["ui-element-1", "ui-element-2"],
                 "values": ["value1", "value2"],
+                "auto_run": True,
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"] == "application/json"
+        assert "success" in response.json()
+
+    @staticmethod
+    @with_session(SESSION_ID)
+    def test_instantiate_autorun_false(client: TestClient) -> None:
+        response = client.post(
+            "/api/kernel/instantiate",
+            headers=HEADERS,
+            json={
+                "object_ids": ["ui-element-1", "ui-element-2"],
+                "values": ["value1", "value2"],
+                "auto_run": False,
             },
         )
         assert response.status_code == 200, response.text
@@ -116,6 +136,71 @@ class TestExecutionRoutes_EditMode:
         assert response.headers["content-type"] == "application/json"
         assert "success" in response.json()
 
+    @staticmethod
+    @with_session(SESSION_ID)
+    def test_takeover_no_file_key(client: TestClient) -> None:
+        response = client.post(
+            "/api/kernel/takeover",
+            headers=HEADERS,
+        )
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"] == "application/json"
+        assert response.json()["status"] == "ok"
+
+    @staticmethod
+    @with_session(SESSION_ID)
+    def test_takeover_file_key(client: TestClient) -> None:
+        response = client.post(
+            "/api/kernel/takeover?file=test.py",
+            headers=HEADERS,
+        )
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"] == "application/json"
+        assert response.json()["status"] == "ok"
+
+    @staticmethod
+    @with_session(SESSION_ID)
+    def test_app_meta_request(client: TestClient) -> None:
+        response = client.post(
+            "/api/kernel/run",
+            headers=HEADERS,
+            json={
+                "cell_ids": ["test-1"],
+                "codes": [
+                    "import marimo as mo\n"
+                    "import json\n"
+                    "request = dict(mo.app_meta().request)\n"
+                    "request['user'] = bool(request['user'])\n"  # user is not serializable
+                    "print(json.dumps(request))"
+                ],
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"] == "application/json"
+        assert "success" in response.json()
+
+        # Sleep for .5 seconds
+        time.sleep(0.5)
+
+        # Check keys
+        app_meta_response = get_printed_object(client, "test-1")
+        assert set(app_meta_response.keys()) == {
+            "base_url",
+            "cookies",
+            "headers",
+            "user",
+            "path_params",
+            "query_params",
+            "url",
+        }
+        # Check no marimo in headers
+        assert all(
+            "marimo" not in header
+            for header in app_meta_response["headers"].keys()
+        )
+        # Check user is True
+        assert app_meta_response["user"] is True
+
 
 class TestExecutionRoutes_RunMode:
     @staticmethod
@@ -142,6 +227,23 @@ class TestExecutionRoutes_RunMode:
             json={
                 "object_ids": ["ui-element-1", "ui-element-2"],
                 "values": ["value1", "value2"],
+                "auto_run": True,
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"] == "application/json"
+        assert "success" in response.json()
+
+    @staticmethod
+    @with_read_session(SESSION_ID)
+    def test_instantiate_autorun_false(client: TestClient) -> None:
+        response = client.post(
+            "/api/kernel/instantiate",
+            headers=HEADERS,
+            json={
+                "object_ids": ["ui-element-1", "ui-element-2"],
+                "values": ["value1", "value2"],
+                "auto_run": False,
             },
         )
         assert response.status_code == 200, response.text
@@ -199,3 +301,61 @@ class TestExecutionRoutes_RunMode:
             json={"code": "print('Hello, scratchpad')"},
         )
         assert response.status_code == 401, response.text
+
+    @staticmethod
+    @with_read_session(SESSION_ID)
+    def test_takeover_no_file_key(client: TestClient) -> None:
+        response = client.post("/api/kernel/takeover", headers=HEADERS)
+        assert response.status_code == 401, response.text
+
+    @staticmethod
+    @with_session(SESSION_ID)
+    def with_read_session(client: TestClient) -> None:
+        response = client.post(
+            "/api/kernel/run",
+            headers=HEADERS,
+            json={
+                "cell_ids": ["test-1"],
+                "codes": [
+                    "import marimo as mo\n"
+                    "import json\n"
+                    "request = dict(mo.app_meta().request)\n"
+                    "request['user'] = bool(request['user'])\n"  # user is not serializable
+                    "print(json.dumps(request))"
+                ],
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"] == "application/json"
+        assert "success" in response.json()
+
+        # Sleep for .5 seconds
+        time.sleep(0.5)
+
+        # Check keys
+        app_meta_response = get_printed_object(client, "test-1")
+        assert set(app_meta_response.keys()) == {
+            "base_url",
+            "cookies",
+            "headers",
+            "user",
+            "path_params",
+            "query_params",
+            "url",
+        }
+        # Check no marimo in headers
+        assert all(
+            "marimo" not in header
+            for header in app_meta_response["headers"].keys()
+        )
+        # Check user is True
+        assert app_meta_response["user"] is True
+
+
+def get_printed_object(client: TestClient, cell_id: str) -> dict[str, Any]:
+    session = get_session_manager(client).get_session(SESSION_ID)
+    assert session
+    console = first(session.session_view.cell_operations[cell_id].console)
+    assert console
+    assert isinstance(console.data, str)
+    return json.loads(console.data)

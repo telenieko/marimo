@@ -30,38 +30,32 @@ class lazy(UIElement[bool, bool]):
     Using a function is useful when the item to render is
     the result of a database query or some other expensive operation.
 
-    **Examples.**
+    Examples:
+        Create a lazy-loaded tab:
+        ```python
+        tabs = mo.ui.tabs(
+            {"Overview": tab1, "Charts": mo.lazy(expensive_component)}
+        )
+        ```
 
-    Create a lazy-loaded tab:
+        Create a lazy-loaded accordion:
+        ```python
+        accordion = mo.accordion({"Charts": mo.lazy(expensive_component)})
+        ```
 
-    ```python
-    tabs = mo.ui.tabs(
-        {"Overview": tab1, "Charts": mo.lazy(expensive_component)}
-    )
-    ```
-
-    Create a lazy-loaded accordion:
-
-    ```python
-    accordion = mo.ui.accordion({"Charts": mo.lazy(expensive_component)})
-    ```
-
-    Usage with async functions:
-
-    ```python
-    async def expensive_component(): ...
+        Usage with async functions:
+        ```python
+        async def expensive_component(): ...
 
 
-    mo.lazy(expensive_component)
-    ```
+        mo.lazy(expensive_component)
+        ```
 
-
-    **Initialization Args.**
-
-    - `element`: object or callable that returns content to be lazily loaded
-    - `show_loading_indicator`: a boolean, whether to show a loading
-        indicator while the content is being loaded.
-        Default is `False`.
+    Args:
+        element (Union[Callable[[], object], object, Callable[[], Coroutine[None, None, object]]]):
+            Object or callable that returns content to be lazily loaded.
+        show_loading_indicator (bool, optional): Whether to show a loading indicator
+            while the content is being loaded. Defaults to False.
     """
 
     _name: Final[str] = "marimo-lazy"
@@ -87,9 +81,9 @@ class lazy(UIElement[bool, bool]):
             on_change=None,
             functions=(
                 Function(
-                    name=self.load.__name__,
+                    name="load",
                     arg_cls=EmptyArgs,
-                    function=self.load,
+                    function=self._load,
                 ),
             ),
         )
@@ -97,7 +91,7 @@ class lazy(UIElement[bool, bool]):
     def _convert_value(self, value: bool) -> bool:
         return value
 
-    async def load(self, _args: EmptyArgs) -> LoadResponse:
+    async def _load(self, _args: EmptyArgs) -> LoadResponse:
         if callable(self._element) and not isinstance(
             self._element, UIElement
         ):

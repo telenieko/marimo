@@ -30,24 +30,31 @@ from marimo._plugins.ui._impl.table import (
     SortArgs,
 )
 from marimo._plugins.ui._impl.tables.table_manager import (
+    FieldTypes,
     TableManager,
 )
 from marimo._plugins.ui._impl.tables.utils import (
     get_table_manager,
 )
+from marimo._plugins.validators import (
+    validate_no_integer_columns,
+    validate_page_size,
+)
 from marimo._runtime.functions import EmptyArgs, Function
+from marimo._utils.memoize import memoize_last_value
 from marimo._utils.parse_dataclass import parse_raw
 
 
 @dataclass
 class GetDataFrameResponse:
     url: str
-    has_more: bool
     total_rows: int
     # List of column names that are actually row headers
     # This really only applies to Pandas, that has special index columns
     row_headers: List[str]
-    supports_code_sample: bool
+    field_types: FieldTypes
+    python_code: Optional[str] = None
+    sql_code: Optional[str] = None
 
 
 @dataclass
@@ -75,38 +82,39 @@ class GetDataFrameError(Exception):
 
 @mddoc
 class dataframe(UIElement[Dict[str, Any], DataFrameType]):
-    """
-    Run transformations on a DataFrame or series.
+    """Run transformations on a DataFrame or series.
+
     Currently only Pandas or Polars DataFrames are supported.
 
-    **Example.**
+    Examples:
+        ```python
+        dataframe = mo.ui.dataframe(data)
+        ```
 
-    ```python
-    dataframe = mo.ui.dataframe(data)
-    ```
+    Attributes:
+        value (DataFrameType): The transformed DataFrame or series.
 
-    **Attributes.**
-
-    - `value`: the transformed DataFrame or series
-
-    **Initialization Args.**
-
-    - `df`: the DataFrame or series to transform
-    - `page_size`: the number of rows to show in the table
+    Args:
+        df (DataFrameType): The DataFrame or series to transform.
+        page_size (Optional[int], optional): The number of rows to show in the table.
+            Defaults to 5.
+        limit (Optional[int], optional): The number of items to load into memory, in case
+            the data is remote and lazily fetched. This is likely true for SQL-backed
+            dataframes via Ibis.
+        on_change (Optional[Callable[[DataFrameType], None]], optional): Optional callback
+            to run when this element's value changes.
     """
 
     _name: Final[str] = "marimo-dataframe"
-
-    # Only get the first 100 (for performance reasons)
-    # Could make this configurable in the arguments later if desired.
-    DISPLAY_LIMIT = 100
 
     def __init__(
         self,
         df: DataFrameType,
         on_change: Optional[Callable[[DataFrameType], None]] = None,
         page_size: Optional[int] = 5,
+        limit: Optional[int] = None,
     ) -> None:
+        validate_no_integer_columns(df)
         # This will raise an error if the dataframe type is not supported.
         handler = get_handler_for_dataframe(df)
 
@@ -125,13 +133,18 @@ class dataframe(UIElement[Dict[str, Any], DataFrameType]):
         except Exception:
             pass
 
+        self._limit = limit
+        self._dataframe_name = dataframe_name
         self._data = df
         self._handler = handler
-        self._manager = get_table_manager(df)
+        self._manager = self._get_cached_table_manager(df, self._limit)
         self._transform_container = TransformsContainer[DataFrameType](
             df, handler
         )
         self._error: Optional[str] = None
+        self._last_transforms = Transformations([])
+        self._page_size = page_size or 5  # Default to 5 rows (.head())
+        validate_page_size(self._page_size)
 
         super().__init__(
             component_name=dataframe._name,
@@ -143,24 +156,24 @@ class dataframe(UIElement[Dict[str, Any], DataFrameType]):
             args={
                 "columns": self._get_column_types(),
                 "dataframe-name": dataframe_name,
-                "total": self._manager.get_num_rows(),
+                "total": self._manager.get_num_rows(force=False),
                 "page-size": page_size,
             },
             functions=(
                 Function(
-                    name=self.get_dataframe.__name__,
+                    name="get_dataframe",
                     arg_cls=EmptyArgs,
-                    function=self.get_dataframe,
+                    function=self._get_dataframe,
                 ),
                 Function(
-                    name=self.get_column_values.__name__,
+                    name="get_column_values",
                     arg_cls=GetColumnValuesArgs,
-                    function=self.get_column_values,
+                    function=self._get_column_values,
                 ),
                 Function(
-                    name=self.search.__name__,
+                    name="search",
                     arg_cls=SearchTableArgs,
-                    function=self.search,
+                    function=self._search,
                 ),
             ),
         )
@@ -168,24 +181,31 @@ class dataframe(UIElement[Dict[str, Any], DataFrameType]):
     def _get_column_types(self) -> List[List[Union[str, int]]]:
         return [
             [name, dtype[0], dtype[1]]
-            for name, dtype in self._manager.get_field_types().items()
+            for name, dtype in self._manager.get_field_types()
         ]
 
-    def get_dataframe(self, _args: EmptyArgs) -> GetDataFrameResponse:
+    def _get_dataframe(self, _args: EmptyArgs) -> GetDataFrameResponse:
         if self._error is not None:
             raise GetDataFrameError(self._error)
 
-        manager = get_table_manager(self._data)
-        response = self.search(SearchTableArgs(page_size=10, page_number=0))
+        manager = self._get_cached_table_manager(self._value, self._limit)
+        response = self._search(
+            SearchTableArgs(page_size=self._page_size, page_number=0)
+        )
         return GetDataFrameResponse(
             url=str(response.data),
             total_rows=response.total_rows,
-            has_more=False,
             row_headers=manager.get_row_headers(),
-            supports_code_sample=self._handler.supports_code_sample(),
+            field_types=manager.get_field_types(),
+            python_code=self._handler.as_python_code(
+                self._dataframe_name,
+                manager.get_column_names(),
+                self._last_transforms.transforms,
+            ),
+            sql_code=self._handler.as_sql_code(manager.data),
         )
 
-    def get_column_values(
+    def _get_column_values(
         self, args: GetColumnValuesArgs
     ) -> GetColumnValuesResponse:
         """Get all the unique values in a column."""
@@ -218,6 +238,7 @@ class dataframe(UIElement[Dict[str, Any], DataFrameType]):
             transformations = parse_raw(value, Transformations)
             result = self._transform_container.apply(transformations)
             self._error = None
+            self._last_transforms = transformations
             return result
         except Exception as e:
             error = "Error applying dataframe transform: %s\n\n" % str(e)
@@ -225,18 +246,8 @@ class dataframe(UIElement[Dict[str, Any], DataFrameType]):
             self._error = error
             return self._data
 
-    def search(self, args: SearchTableArgs) -> SearchTableResponse:
+    def _search(self, args: SearchTableArgs) -> SearchTableResponse:
         offset = args.page_number * args.page_size
-
-        # If no query or sort, return nothing
-        # The frontend will just show the original data
-        if not args.query and not args.sort and not args.filters:
-            manager = get_table_manager(self._value)
-            data = manager.take(args.page_size, offset).to_data()
-            return SearchTableResponse(
-                data=data,
-                total_rows=manager.get_num_rows(force=True) or 0,
-            )
 
         # Apply filters, query, and functools.sort using the cached method
         result = self._apply_filters_query_sort(
@@ -256,12 +267,21 @@ class dataframe(UIElement[Dict[str, Any], DataFrameType]):
         query: Optional[str],
         sort: Optional[SortArgs],
     ) -> TableManager[Any]:
-        result = get_table_manager(self._value)
+        result = self._get_cached_table_manager(self._value, self._limit)
 
         if query:
             result = result.search(query)
 
-        if sort:
+        if sort and sort.by in result.get_column_names():
             result = result.sort_values(sort.by, sort.descending)
 
         return result
+
+    @memoize_last_value
+    def _get_cached_table_manager(
+        self, value: Any, limit: Optional[int]
+    ) -> TableManager[Any]:
+        tm = get_table_manager(value)
+        if limit is not None:
+            tm = tm.take(limit, 0)
+        return tm

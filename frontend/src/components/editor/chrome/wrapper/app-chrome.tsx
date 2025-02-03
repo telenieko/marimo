@@ -27,6 +27,10 @@ import { DataSourcesPanel } from "../panels/datasources-panel";
 import { LazyMount } from "@/components/utils/lazy-mount";
 import { ScratchpadPanel } from "../panels/scratchpad-panel";
 import { IfCapability } from "@/core/config/if-capability";
+import { PackagesPanel } from "../panels/packages-panel";
+import { ChatPanel } from "@/components/chat/chat-panel";
+import { TooltipProvider } from "@radix-ui/react-tooltip";
+import { TracingPanel } from "../panels/tracing-panel";
 
 const LazyTerminal = React.lazy(() => import("@/components/terminal/terminal"));
 
@@ -137,16 +141,21 @@ export const AppChrome: React.FC<PropsWithChildren> = ({ children }) => {
               <XIcon className="w-4 h-4" />
             </Button>
           </div>
-          {selectedPanel === "files" && <FileExplorerPanel />}
-          {selectedPanel === "errors" && <ErrorsPanel />}
-          {selectedPanel === "variables" && <VariablePanel />}
-          {selectedPanel === "dependencies" && <DependencyGraphPanel />}
-          {selectedPanel === "outline" && <OutlinePanel />}
-          {selectedPanel === "datasources" && <DataSourcesPanel />}
-          {selectedPanel === "documentation" && <DocumentationPanel />}
-          {selectedPanel === "snippets" && <SnippetsPanel />}
-          {selectedPanel === "scratchpad" && <ScratchpadPanel />}
-          {selectedPanel === "logs" && <LogsPanel />}
+          <TooltipProvider>
+            {selectedPanel === "files" && <FileExplorerPanel />}
+            {selectedPanel === "errors" && <ErrorsPanel />}
+            {selectedPanel === "variables" && <VariablePanel />}
+            {selectedPanel === "dependencies" && <DependencyGraphPanel />}
+            {selectedPanel === "packages" && <PackagesPanel />}
+            {selectedPanel === "outline" && <OutlinePanel />}
+            {selectedPanel === "datasources" && <DataSourcesPanel />}
+            {selectedPanel === "documentation" && <DocumentationPanel />}
+            {selectedPanel === "snippets" && <SnippetsPanel />}
+            {selectedPanel === "scratchpad" && <ScratchpadPanel />}
+            {selectedPanel === "chat" && <ChatPanel />}
+            {selectedPanel === "logs" && <LogsPanel />}
+            {selectedPanel === "tracing" && <TracingPanel />}
+          </TooltipProvider>
         </div>
       </Suspense>
     </ErrorBoundary>
@@ -160,7 +169,7 @@ export const AppChrome: React.FC<PropsWithChildren> = ({ children }) => {
       collapsedSize={0}
       collapsible={true}
       className={cn(
-        "dark:bg-[var(--slate-1)] no-print print:hidden",
+        "dark:bg-[var(--slate-1)] no-print print:hidden hide-on-fullscreen",
         isSidebarOpen && "border-r border-l border-[var(--slate-7)]",
       )}
       minSize={10}
@@ -190,7 +199,7 @@ export const AppChrome: React.FC<PropsWithChildren> = ({ children }) => {
       collapsedSize={0}
       collapsible={true}
       className={cn(
-        "dark:bg-[var(--slate-1)] no-print print:hidden",
+        "dark:bg-[var(--slate-1)] no-print print:hidden hide-on-fullscreen",
         isTerminalOpen && "border-[var(--slate-7)]",
       )}
       minSize={10}
@@ -223,7 +232,9 @@ export const AppChrome: React.FC<PropsWithChildren> = ({ children }) => {
         direction={"horizontal"}
         storage={createStorage("left")}
       >
-        <Sidebar />
+        <TooltipProvider>
+          <Sidebar />
+        </TooltipProvider>
         {helperPanel}
         <Panel>
           <PanelGroup autoSaveId="marimo:chrome:v1:l1" direction="vertical">
@@ -233,7 +244,9 @@ export const AppChrome: React.FC<PropsWithChildren> = ({ children }) => {
         </Panel>
       </PanelGroup>
       <ErrorBoundary>
-        <Footer />
+        <TooltipProvider>
+          <Footer />
+        </TooltipProvider>
       </ErrorBoundary>
     </div>
   );

@@ -1,12 +1,12 @@
-# syntax=docker/dockerfile:1.9
-FROM python:3.12-slim AS base
+# syntax=docker/dockerfile:1.12
+FROM python:3.13-slim AS base
 
 # Create a non-root user
 RUN useradd -m appuser
 
 WORKDIR /app
 
-ARG marimo_version=0.8.0
+ARG marimo_version=0.8.15
 ENV MARIMO_SKIP_UPDATE_CHECK=1
 RUN pip install --no-cache-dir marimo==${marimo_version} && \
   mkdir -p /app/data && \

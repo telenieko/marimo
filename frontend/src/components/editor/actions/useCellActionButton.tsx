@@ -2,16 +2,8 @@
 import { downloadCellOutput } from "@/components/export/export-output-button";
 import { Switch } from "@/components/ui/switch";
 import { formatEditorViews } from "@/core/codemirror/format";
-import {
-  canToggleToLanguage,
-  getCurrentLanguageAdapter,
-  toggleToLanguage,
-} from "@/core/codemirror/language/commands";
-import {
-  hasOnlyOneCellAtom,
-  useCellActions,
-  useCellIds,
-} from "@/core/cells/cells";
+import { toggleToLanguage } from "@/core/codemirror/language/commands";
+import { hasOnlyOneCellAtom, useCellActions } from "@/core/cells/cells";
 import {
   ImageIcon,
   Code2Icon,
@@ -29,6 +21,11 @@ import {
   EyeOffIcon,
   SparklesIcon,
   DatabaseIcon,
+  Columns2Icon,
+  XCircleIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  ScissorsIcon,
 } from "lucide-react";
 import type { ActionButton } from "./types";
 import { MultiIcon } from "@/components/icons/multi-icon";
@@ -48,17 +45,24 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { MarkdownIcon, PythonIcon } from "../cell/code/icons";
-import { aiEnabledAtom, autoInstantiateAtom } from "@/core/config/config";
+import {
+  aiEnabledAtom,
+  appWidthAtom,
+  autoInstantiateAtom,
+} from "@/core/config/config";
 import { useDeleteCellCallback } from "../cell/useDeleteCell";
 import { maybeAddMarimoImport } from "@/core/cells/add-missing-import";
 import type { CellConfig, RuntimeState } from "@/core/network/types";
 import { kioskModeAtom } from "@/core/mode";
+import { switchLanguage } from "@/core/codemirror/language/extension";
+import { useSplitCellCallback } from "../cell/useSplitCell";
 
 export interface CellActionButtonProps
   extends Pick<CellData, "name" | "config"> {
   cellId: CellId;
   status: RuntimeState;
   hasOutput: boolean;
+  hasConsoleOutput: boolean;
   getEditorView: () => EditorView | null;
 }
 
@@ -75,7 +79,10 @@ export function useCellActionButtons({ cell }: Props) {
     moveCell,
     sendToTop,
     sendToBottom,
+    addColumnBreakpoint,
+    clearCellOutput,
   } = useCellActions();
+  const splitCell = useSplitCellCallback();
   const runCell = useRunCell(cell?.cellId);
   const hasOnlyOneCell = useAtomValue(hasOnlyOneCellAtom);
   const canDelete = !hasOnlyOneCell;
@@ -84,16 +91,22 @@ export function useCellActionButtons({ cell }: Props) {
   const setAiCompletionCell = useSetAtom(aiCompletionCellAtom);
   const aiEnabled = useAtomValue(aiEnabledAtom);
   const autoInstantiate = useAtomValue(autoInstantiateAtom);
-  const cellIds = useCellIds();
   const kioskMode = useAtomValue(kioskModeAtom);
+  const appWidth = useAtomValue(appWidthAtom);
 
   if (!cell || kioskMode) {
     return [];
   }
 
-  const { cellId, config, getEditorView, name, hasOutput, status } = cell;
-  const cellIdx = cellIds.inOrderIds.indexOf(cellId);
-  const editorView = getEditorView();
+  const {
+    cellId,
+    config,
+    getEditorView,
+    name,
+    hasOutput,
+    hasConsoleOutput,
+    status,
+  } = cell;
 
   const toggleDisabled = async () => {
     const newConfig = { disabled: !config.disabled };
@@ -105,7 +118,7 @@ export function useCellActionButtons({ cell }: Props) {
     const newConfig: Partial<CellConfig> = { hide_code: !config.hide_code };
     await saveCellConfig({ configs: { [cellId]: newConfig } });
     updateCellConfig({ cellId, config: newConfig });
-
+    const editorView = getEditorView();
     // If we're hiding the code, we should blur the editor
     // otherwise, we should focus it
     if (editorView) {
@@ -137,7 +150,7 @@ export function useCellActionButtons({ cell }: Props) {
               <div className="flex items-center justify-between">
                 <Label htmlFor="cell-name">Cell name</Label>
                 <NameCellInput
-                  placeholder={`cell_${cellIdx}`}
+                  placeholder={"cell name"}
                   value={name}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
@@ -156,7 +169,7 @@ export function useCellActionButtons({ cell }: Props) {
         },
         rightElement: (
           <NameCellInput
-            placeholder={`cell_${cellIdx}`}
+            placeholder={"cell name"}
             value={name}
             onChange={(newName) => updateCellName({ cellId, name: newName })}
           />
@@ -185,6 +198,12 @@ export function useCellActionButtons({ cell }: Props) {
         hotkey: "cell.aiCompletion",
       },
       {
+        icon: <ScissorsIcon size={13} strokeWidth={1.5} />,
+        label: "Split cell",
+        hotkey: "cell.splitCell",
+        handle: () => splitCell({ cellId }),
+      },
+      {
         icon: <ImageIcon size={13} strokeWidth={1.5} />,
         label: "Export output as PNG",
         hidden: !hasOutput,
@@ -195,54 +214,11 @@ export function useCellActionButtons({ cell }: Props) {
         label: "Format cell",
         hotkey: "cell.format",
         handle: () => {
+          const editorView = getEditorView();
           if (!editorView) {
             return;
           }
           formatEditorViews({ [cellId]: editorView }, updateCellCode);
-        },
-      },
-      {
-        icon: <MarkdownIcon />,
-        label: "View as Markdown",
-        hotkey: "cell.viewAsMarkdown",
-        // We allow them to toggle to markdown in Python
-        // even if its not wrapped in a mo.md
-        hidden: getCurrentLanguageAdapter(editorView) !== "python",
-        handle: () => {
-          if (!editorView) {
-            return;
-          }
-          maybeAddMarimoImport(autoInstantiate, createCell);
-
-          toggleToLanguage(editorView, "markdown", { force: true });
-        },
-      },
-      {
-        icon: <DatabaseIcon size={13} strokeWidth={1.5} />,
-        label: "View as SQL",
-        hidden: !canToggleToLanguage(editorView, "sql"),
-        handle: () => {
-          if (!editorView) {
-            return;
-          }
-          toggleToLanguage(editorView, "sql");
-        },
-      },
-      {
-        icon: <PythonIcon />,
-        label: "View as Python",
-        // If we're in markdown mode, we should use the markdown hotkey
-        hotkey:
-          getCurrentLanguageAdapter(editorView) === "markdown"
-            ? "cell.viewAsMarkdown"
-            : undefined,
-        hidden: !canToggleToLanguage(editorView, "python"),
-        handle: () => {
-          if (!editorView) {
-            return;
-          }
-          maybeAddMarimoImport(autoInstantiate, createCell);
-          toggleToLanguage(editorView, "python");
         },
       },
       {
@@ -271,6 +247,55 @@ export function useCellActionButtons({ cell }: Props) {
           />
         ),
         handle: toggleDisabled,
+      },
+      {
+        icon: <XCircleIcon size={13} strokeWidth={1.5} />,
+        label: "Clear output",
+        hidden: !(hasOutput || hasConsoleOutput),
+        handle: () => {
+          clearCellOutput({ cellId });
+        },
+      },
+    ],
+
+    // View as
+    [
+      {
+        icon: <MarkdownIcon />,
+        label: "Convert to Markdown",
+        hotkey: "cell.viewAsMarkdown",
+        handle: () => {
+          const editorView = getEditorView();
+          if (!editorView) {
+            return;
+          }
+          maybeAddMarimoImport(autoInstantiate, createCell);
+          switchLanguage(editorView, "markdown", { keepCodeAsIs: true });
+        },
+      },
+      {
+        icon: <DatabaseIcon size={13} strokeWidth={1.5} />,
+        label: "Convert to SQL",
+        handle: () => {
+          const editorView = getEditorView();
+          if (!editorView) {
+            return;
+          }
+          maybeAddMarimoImport(autoInstantiate, createCell);
+          switchLanguage(editorView, "sql", { keepCodeAsIs: true });
+        },
+      },
+      {
+        icon: <PythonIcon />,
+        label: "Toggle as Python",
+        handle: () => {
+          const editorView = getEditorView();
+          if (!editorView) {
+            return;
+          }
+          maybeAddMarimoImport(autoInstantiate, createCell);
+          toggleToLanguage(editorView, "python", { force: true });
+        },
       },
     ],
 
@@ -311,6 +336,20 @@ export function useCellActionButtons({ cell }: Props) {
         handle: () => moveCell({ cellId, before: false }),
       },
       {
+        icon: <ChevronLeftIcon size={13} strokeWidth={1.5} />,
+        label: "Move cell left",
+        hotkey: "cell.moveLeft",
+        handle: () => moveCell({ cellId, direction: "left" }),
+        hidden: appWidth !== "columns",
+      },
+      {
+        icon: <ChevronRightIcon size={13} strokeWidth={1.5} />,
+        label: "Move cell right",
+        hotkey: "cell.moveRight",
+        handle: () => moveCell({ cellId, direction: "right" }),
+        hidden: appWidth !== "columns",
+      },
+      {
         icon: <ChevronsUpIcon size={13} strokeWidth={1.5} />,
         label: "Send to top",
         hotkey: "cell.sendToTop",
@@ -321,6 +360,13 @@ export function useCellActionButtons({ cell }: Props) {
         label: "Send to bottom",
         hotkey: "cell.sendToBottom",
         handle: () => sendToBottom({ cellId }),
+      },
+      {
+        icon: <Columns2Icon size={13} strokeWidth={1.5} />,
+        label: "Break into new column",
+        hotkey: "cell.addColumnBreakpoint",
+        hidden: appWidth !== "columns",
+        handle: () => addColumnBreakpoint({ cellId }),
       },
     ],
 

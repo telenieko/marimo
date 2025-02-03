@@ -13,7 +13,7 @@ from marimo._server.file_manager import AppFileManager
 
 def format_filename_title(filename: str) -> str:
     basename = os.path.basename(filename)
-    name, ext = os.path.splitext(basename)
+    name, _ext = os.path.splitext(basename)
     title = re.sub("[-_]", " ", name)
     return title.title()
 
@@ -37,6 +37,8 @@ def get_app_title(file_manager: AppFileManager) -> str:
 def get_download_filename(file_manager: AppFileManager, extension: str) -> str:
     filename = get_filename(file_manager, f"notebook.{extension}")
     basename = os.path.basename(filename)
+    if basename.endswith(f".{extension}"):
+        return basename
     return f"{os.path.splitext(basename)[0]}.{extension}"
 
 

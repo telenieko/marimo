@@ -1,21 +1,95 @@
 from __future__ import annotations
 
 import datetime
+import json
 import unittest
+from typing import Any
+from unittest.mock import Mock
 
+import narwhals.stable.v1 as nw
 import pytest
 
 from marimo._data.models import ColumnSummary
 from marimo._dependencies.dependencies import DependencyManager
+from marimo._plugins.ui._impl.tables.format import FormatMapping
 from marimo._plugins.ui._impl.tables.pandas_table import (
     PandasTableManagerFactory,
 )
+from marimo._plugins.ui._impl.tables.table_manager import TableManager
+from tests.mocks import snapshotter
 
 HAS_DEPS = DependencyManager.pandas.has()
+
+snapshot = snapshotter(__file__)
+
+
+def assert_frame_equal(a: Any, b: Any) -> None:
+    import pandas as pd
+
+    if isinstance(a, nw.DataFrame):
+        a = a.to_native()
+    if isinstance(b, nw.DataFrame):
+        b = b.to_native()
+    pd.testing.assert_frame_equal(a, b)
+
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = Mock()
 
 
 @pytest.mark.skipif(not HAS_DEPS, reason="optional dependencies not installed")
 class TestPandasTableManager(unittest.TestCase):
+    def get_complex_data(self) -> TableManager[Any]:
+        import pandas as pd
+
+        complex_data = pd.DataFrame(
+            {
+                "strings": ["a", "b", "c"],
+                "bool": [True, False, True],
+                "int": [1, 2, 3],
+                "float": [1.0, 2.0, 3.0],
+                "datetime": [
+                    datetime.datetime(2021, 1, 1),
+                    datetime.datetime(2021, 1, 2),
+                    datetime.datetime(2021, 1, 3),
+                ],
+                "date": [
+                    datetime.date(2021, 1, 1),
+                    datetime.date(2021, 1, 2),
+                    datetime.date(2021, 1, 3),
+                ],
+                "struct": [
+                    {"a": 1, "b": 2},
+                    {"a": 3, "b": 4},
+                    {"a": 5, "b": 6},
+                ],
+                "list": pd.Series([[1, 2], [3, 4], [5, 6]]),
+                "nulls": pd.Series([None, "data", None]),
+                "category": pd.Categorical(["cat", "dog", "mouse"]),
+                "set": [set([1, 2]), set([3, 4]), set([5, 6])],
+                "imaginary": [1 + 2j, 3 + 4j, 5 + 6j],
+                "time": [
+                    datetime.time(12, 30),
+                    datetime.time(13, 45),
+                    datetime.time(14, 15),
+                ],
+                "duration": [
+                    datetime.timedelta(days=1),
+                    datetime.timedelta(days=2),
+                    datetime.timedelta(days=3),
+                ],
+                "mixed_list": [
+                    [1, "two"],
+                    [3.0, False],
+                    [None, datetime.datetime(2021, 1, 1)],
+                ],
+            },
+        )
+
+        return self.factory.create()(complex_data)
+
     def setUp(self) -> None:
         import pandas as pd
 
@@ -46,40 +120,73 @@ class TestPandasTableManager(unittest.TestCase):
         assert self.factory.package_name() == "pandas"
 
     def test_to_csv(self) -> None:
-        expected_csv = self.data.to_csv(index=False).encode("utf-8")
+        expected_csv = self.data.to_csv(
+            index=False, date_format="%Y-%m-%d %H:%M:%S%z"
+        ).encode("utf-8")
         assert self.manager.to_csv() == expected_csv
+
+    def test_to_csv_datetime(self) -> None:
+        D = pd.to_datetime("2024-12-17", errors="coerce")
+
+        data = {
+            "D timestamp": [D],
+        }
+        df = pd.DataFrame(data)
+        manager = PandasTableManagerFactory.create()(df)
+        assert "2024-12-17 00:00:00" in manager.to_csv().decode("utf-8")
+
+    def test_to_csv_datetime_with_timezone(self) -> None:
+        D = pd.to_datetime("2024-12-17", errors="coerce").tz_localize("UTC")
+
+        data = {
+            "D timestamp": [D],
+        }
+        df = pd.DataFrame(data)
+        manager = PandasTableManagerFactory.create()(df)
+        assert "2024-12-17 00:00:00+0000" in manager.to_csv().decode("utf-8")
+
+    def test_to_csv_complex(self) -> None:
+        complex_data = self.get_complex_data()
+        data = complex_data.to_csv()
+        assert isinstance(data, bytes)
+        snapshot("pandas.csv", data.decode("utf-8"))
 
     def test_to_json(self) -> None:
         expected_json = self.data.to_json(orient="records").encode("utf-8")
         assert self.manager.to_json() == expected_json
 
-    def test_select_rows(self) -> None:
-        import pandas as pd
+    def test_to_json_complex(self) -> None:
+        complex_data = self.get_complex_data()
+        data = complex_data.to_json()
+        assert isinstance(data, bytes)
+        snapshot("pandas.json", data.decode("utf-8"))
 
+    def test_complex_data_field_types(self) -> None:
+        complex_data = self.get_complex_data()
+        field_types = complex_data.get_field_types()
+        snapshot("pandas.field_types.json", json.dumps(field_types))
+
+    def test_select_rows(self) -> None:
         indices = [0, 2]
         selected_manager = self.manager.select_rows(indices)
         expected_data = self.data.iloc[indices]
-        pd.testing.assert_frame_equal(selected_manager.data, expected_data)
+        assert_frame_equal(selected_manager.data, expected_data)
 
     def test_select_rows_empty(self) -> None:
         selected_manager = self.manager.select_rows([])
         assert selected_manager.data.shape == (0, 6)
 
     def test_select_columns(self) -> None:
-        import pandas as pd
-
         columns = ["A", "C"]
         selected_manager = self.manager.select_columns(columns)
         expected_data = self.data[columns]
-        pd.testing.assert_frame_equal(selected_manager.data, expected_data)
+        assert_frame_equal(selected_manager.data, expected_data)
 
     def test_get_row_headers(self) -> None:
         expected_headers = []
         assert self.manager.get_row_headers() == expected_headers
 
     def test_get_row_headers_date_index(self) -> None:
-        import pandas as pd
-
         data = pd.DataFrame(
             {
                 "A": [1, 2, 3],
@@ -92,8 +199,6 @@ class TestPandasTableManager(unittest.TestCase):
         assert manager.get_row_headers() == [""]
 
     def test_get_row_headers_timedelta_index(self) -> None:
-        import pandas as pd
-
         data = pd.DataFrame(
             {
                 "A": [1, 2, 3],
@@ -106,8 +211,6 @@ class TestPandasTableManager(unittest.TestCase):
         assert manager.get_row_headers() == [""]
 
     def test_get_row_headers_multi_index(self) -> None:
-        import pandas as pd
-
         data = pd.DataFrame(
             {
                 "A": [1, 2, 3],
@@ -126,16 +229,14 @@ class TestPandasTableManager(unittest.TestCase):
         assert not self.manager.is_type("not a dataframe")
 
     def test_get_field_types(self) -> None:
-        import pandas as pd
-
-        expected_field_types = {
-            "A": ("integer", "int64"),
-            "B": ("string", "object"),
-            "C": ("number", "float64"),
-            "D": ("boolean", "bool"),
-            "E": ("date", "datetime64[ns]"),
-            "F": ("string", "object"),
-        }
+        expected_field_types = [
+            ("A", ("integer", "int64")),
+            ("B", ("string", "object")),
+            ("C", ("number", "float64")),
+            ("D", ("boolean", "bool")),
+            ("E", ("datetime", "datetime64[ns]")),
+            ("F", ("string", "object")),
+        ]
         assert self.manager.get_field_types() == expected_field_types
 
         complex_data = pd.DataFrame(
@@ -164,26 +265,27 @@ class TestPandasTableManager(unittest.TestCase):
                 ],
             }
         )
-        expected_field_types = {
-            "A": ("integer", "int64"),
-            "B": ("string", "object"),
-            "C": ("number", "float64"),
-            "D": ("boolean", "bool"),
-            "E": ("unknown", "complex128"),
-            "F": ("string", "object"),
-            "G": ("string", "object"),
-            "H": ("date", "datetime64[ns]"),
-            "I": ("string", "timedelta64[ns]"),
-            "J": ("string", "interval[int64, right]"),
-        }
+        expected_field_types = [
+            ("A", ("integer", "int64")),
+            ("B", ("string", "object")),
+            ("C", ("number", "float64")),
+            ("D", ("boolean", "bool")),
+            ("E", ("unknown", "complex128")),
+            ("F", ("string", "object")),
+            ("G", ("string", "object")),
+            ("H", ("datetime", "datetime64[ns]")),
+            ("I", ("string", "timedelta64[ns]")),
+            ("J", ("string", "interval[int64, right]")),
+        ]
         assert (
             self.factory.create()(complex_data).get_field_types()
             == expected_field_types
         )
 
+    @pytest.mark.xfail(
+        reason="Narwhals (wrapped pandas) doesn't support duplicate columns",
+    )
     def test_get_fields_types_duplicate_columns(self) -> None:
-        import pandas as pd
-
         # Different types
         data = pd.DataFrame(
             {
@@ -192,9 +294,9 @@ class TestPandasTableManager(unittest.TestCase):
             }
         )
         data = data.rename(columns={"A": "B"})
-        expected_field_types = {
-            "B": ("string", "object"),
-        }
+        expected_field_types = [
+            ("B", ("string", "object")),
+        ]
         assert (
             self.factory.create()(data).get_field_types()
             == expected_field_types
@@ -208,9 +310,9 @@ class TestPandasTableManager(unittest.TestCase):
             }
         )
         data = data.rename(columns={"A": "B"})
-        expected_field_types = {
-            "B": ("string", "object"),
-        }
+        expected_field_types = [
+            ("B", ("string", "object")),
+        ]
         assert (
             self.factory.create()(data).get_field_types()
             == expected_field_types
@@ -224,21 +326,45 @@ class TestPandasTableManager(unittest.TestCase):
             }
         )
         data = data.rename(columns={"A": "B"})
-        expected_field_types = {
-            "B": ("string", "object"),
-        }
+        expected_field_types = [
+            ("B", ("string", "object")),
+        ]
         assert (
             self.factory.create()(data).get_field_types()
             == expected_field_types
         )
 
     def test_limit(self) -> None:
-        import pandas as pd
-
         limit = 2
         limited_manager = self.manager.take(limit, 0)
         expected_data = self.data.head(limit)
-        pd.testing.assert_frame_equal(limited_manager.data, expected_data)
+        assert_frame_equal(limited_manager.data, expected_data)
+
+    def test_take(self) -> None:
+        assert self.manager.take(1, 0).data["A"].to_list() == [1]
+        assert self.manager.take(2, 0).data["A"].to_list() == [1, 2]
+        assert self.manager.take(2, 1).data["A"].to_list() == [2, 3]
+        assert self.manager.take(2, 2).data["A"].to_list() == [3]
+
+    def test_take_zero(self) -> None:
+        limited_manager = self.manager.take(0, 0)
+        assert limited_manager.data.is_empty()
+
+    def test_take_negative(self) -> None:
+        with pytest.raises(ValueError):
+            self.manager.take(-1, 0)
+
+    def test_take_negative_offset(self) -> None:
+        with pytest.raises(ValueError):
+            self.manager.take(1, -1)
+
+    def test_take_out_of_bounds(self) -> None:
+        # Too large of page
+        assert len(self.manager.take(10, 0).data) == 3
+        assert len(self.data) == 3
+
+        # Too large of page and offset
+        assert len(self.manager.take(10, 10).data) == 0
 
     def test_summary_integer(self) -> None:
         column = "A"
@@ -246,16 +372,18 @@ class TestPandasTableManager(unittest.TestCase):
         assert summary == ColumnSummary(
             total=3,
             nulls=0,
-            unique=None,
+            unique=3,
             min=1,
             max=3,
             mean=2.0,
-            median=2.0,
+            median=2,
             std=1.0,
-            p5=1.1,
-            p25=1.5,
-            p75=2.5,
-            p95=2.9,
+            true=None,
+            false=None,
+            p5=1,
+            p25=1,
+            p75=3,
+            p95=3,
         )
 
     def test_summary_string(self) -> None:
@@ -273,15 +401,18 @@ class TestPandasTableManager(unittest.TestCase):
         assert summary == ColumnSummary(
             total=3,
             nulls=0,
+            unique=None,
             min=1.0,
             max=3.0,
             mean=2.0,
             median=2.0,
             std=1.0,
-            p5=1.1,
-            p25=1.5,
-            p75=2.5,
-            p95=2.9,
+            true=None,
+            false=None,
+            p5=1.0,
+            p25=1.0,
+            p75=3.0,
+            p95=3.0,
         )
 
     def test_summary_boolean(self) -> None:
@@ -297,7 +428,6 @@ class TestPandasTableManager(unittest.TestCase):
     def test_summary_date(self) -> None:
         column = "E"
         summary = self.manager.get_summary(column)
-        import pandas as pd
 
         assert summary == ColumnSummary(
             total=3,
@@ -310,10 +440,10 @@ class TestPandasTableManager(unittest.TestCase):
             std=None,
             true=None,
             false=None,
-            p5=pd.Timestamp("2021-01-01 02:24:00"),
-            p25=pd.Timestamp("2021-01-01 12:00:00"),
-            p75=pd.Timestamp("2021-01-02 12:00:00"),
-            p95=pd.Timestamp("2021-01-02 21:36:00"),
+            p5=pd.Timestamp("2021-01-01 00:00:00"),
+            p25=pd.Timestamp("2021-01-01 00:00:00"),
+            p75=pd.Timestamp("2021-01-03 00:00:00"),
+            p95=pd.Timestamp("2021-01-03 00:00:00"),
         )
 
     def test_summary_list(self) -> None:
@@ -324,14 +454,17 @@ class TestPandasTableManager(unittest.TestCase):
             nulls=0,
         )
 
+    def test_summary_does_fail_on_each_column(self) -> None:
+        complex_data = self.get_complex_data()
+        for column in complex_data.get_column_names():
+            assert complex_data.get_summary(column) is not None
+
     def test_sort_values(self) -> None:
         sorted_df = self.manager.sort_values("A", descending=True).data
         expected_df = self.data.sort_values("A", ascending=False)
-        assert sorted_df.equals(expected_df)
+        assert_frame_equal(sorted_df, expected_df)
 
     def test_sort_values_with_index(self) -> None:
-        import pandas as pd
-
         data = pd.DataFrame(
             {
                 "A": [1, 3, 2],
@@ -341,7 +474,7 @@ class TestPandasTableManager(unittest.TestCase):
         data.index.name = "index"
         manager = self.factory.create()(data)
         sorted_df = manager.sort_values("A", descending=True).data
-        assert sorted_df.index.tolist() == [3, 2, 1]
+        assert sorted_df.to_native().index.tolist() == [3, 2, 1]
 
     def test_get_unique_column_values(self) -> None:
         column = "B"
@@ -352,37 +485,46 @@ class TestPandasTableManager(unittest.TestCase):
         ]
 
     def test_search(self) -> None:
-        import pandas as pd
-
         df = pd.DataFrame(
             {
                 "A": [1, 2, 3],
                 "B": ["foo", "bar", "baz"],
                 "C": [True, False, True],
+                "D": [["zz", "yyy"], [], []],
+                "E": [1.1, 2.2, 3.3],
+                "G": ["U", "T", "V"],
             }
         )
         manager = self.factory.create()(df)
+        # Exact match
         assert manager.search("foo").get_num_rows() == 1
+        # Contains
         assert manager.search("a").get_num_rows() == 2
+        # Case insensitive
+        assert manager.search("v").get_num_rows() == 1
+        assert manager.search("V").get_num_rows() == 1
+        # Case insensitive / boolean
         assert manager.search("true").get_num_rows() == 2
+        # Overmatch
         assert manager.search("food").get_num_rows() == 0
+        # Int (exact match)
+        assert manager.search("1").get_num_rows() == 1
+        # Float (exact match)
+        assert manager.search("1.1").get_num_rows() == 1
+        # List (exact match)
+        assert manager.search("yyy").get_num_rows() == 0
+        assert manager.search("y").get_num_rows() == 0
 
     def test_apply_formatting_does_not_modify_original_data(self) -> None:
-        import pandas as pd
-
         original_data = self.data.copy()
         format_mapping = {
             "A": lambda x: x * 2,
             "B": lambda x: x.upper(),
         }
-        self.manager.apply_formatting(format_mapping)
-        pd.testing.assert_frame_equal(self.manager.data, original_data)
+        assert self.manager.apply_formatting(format_mapping).data is not None
+        assert_frame_equal(self.manager.data, original_data)
 
     def test_apply_formatting(self) -> None:
-        import pandas as pd
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
-
         format_mapping: FormatMapping = {
             "A": lambda x: x * 2,
             "B": lambda x: x.upper(),
@@ -391,7 +533,7 @@ class TestPandasTableManager(unittest.TestCase):
             "E": lambda x: x.strftime("%Y-%m-%d"),
         }
 
-        formatted_data = self.manager.apply_formatting(format_mapping)
+        formatted_data = self.manager.apply_formatting(format_mapping).data
         expected_data = pd.DataFrame(
             {
                 "A": [2, 4, 6],
@@ -406,13 +548,9 @@ class TestPandasTableManager(unittest.TestCase):
                 ],  # No formatting applied
             }
         )
-        pd.testing.assert_frame_equal(formatted_data, expected_data)
+        assert_frame_equal(formatted_data, expected_data)
 
     def test_apply_formatting_with_empty_dataframe(self) -> None:
-        import pandas as pd
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
-
         empty_data = pd.DataFrame()
         manager = self.factory.create()(empty_data)
 
@@ -420,19 +558,15 @@ class TestPandasTableManager(unittest.TestCase):
             "A": lambda x: x * 2,
         }
 
-        formatted_data = manager.apply_formatting(format_mapping)
-        pd.testing.assert_frame_equal(formatted_data, empty_data)
+        formatted_data = manager.apply_formatting(format_mapping).data
+        assert_frame_equal(formatted_data, empty_data)
 
     def test_apply_formatting_partial(self) -> None:
-        import pandas as pd
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
-
         format_mapping: FormatMapping = {
             "A": lambda x: x * 2,
         }
 
-        formatted_data = self.manager.apply_formatting(format_mapping)
+        formatted_data = self.manager.apply_formatting(format_mapping).data
         expected_data = pd.DataFrame(
             {
                 "A": [2, 4, 6],
@@ -447,35 +581,23 @@ class TestPandasTableManager(unittest.TestCase):
                 "F": [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
             }
         )
-        pd.testing.assert_frame_equal(formatted_data, expected_data)
+        assert_frame_equal(formatted_data, expected_data)
 
     def test_apply_formatting_empty(self) -> None:
-        import pandas as pd
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
-
         format_mapping: FormatMapping = {}
 
-        formatted_data = self.manager.apply_formatting(format_mapping)
-        pd.testing.assert_frame_equal(formatted_data, self.data)
+        formatted_data = self.manager.apply_formatting(format_mapping).data
+        assert_frame_equal(formatted_data, self.data)
 
     def test_apply_formatting_invalid_column(self) -> None:
-        import pandas as pd
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
-
         format_mapping: FormatMapping = {
             "Z": lambda x: x * 2,
         }
 
-        formatted_data = self.manager.apply_formatting(format_mapping)
-        pd.testing.assert_frame_equal(formatted_data, self.data)
+        formatted_data = self.manager.apply_formatting(format_mapping).data
+        assert_frame_equal(formatted_data, self.data)
 
     def test_apply_formatting_with_nan(self) -> None:
-        import pandas as pd
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
-
         data_with_nan = self.data.copy()
         data_with_nan.loc[1, "A"] = None
         manager_with_nan = self.factory.create()(data_with_nan)
@@ -484,16 +606,12 @@ class TestPandasTableManager(unittest.TestCase):
             "A": lambda x: x * 2 if pd.notna(x) else x,
         }
 
-        formatted_data = manager_with_nan.apply_formatting(format_mapping)
+        formatted_data = manager_with_nan.apply_formatting(format_mapping).data
         expected_data = data_with_nan.copy()
         expected_data["A"] = [2, None, 6]
-        pd.testing.assert_frame_equal(formatted_data, expected_data)
+        assert_frame_equal(formatted_data, expected_data)
 
     def test_apply_formatting_with_mixed_types(self) -> None:
-        import pandas as pd
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
-
         data = pd.DataFrame(
             {
                 "A": [1, 2, 3],
@@ -520,7 +638,7 @@ class TestPandasTableManager(unittest.TestCase):
             "G": str,
         }
 
-        formatted_data = manager.apply_formatting(format_mapping)
+        formatted_data = manager.apply_formatting(format_mapping).data
         expected_data = pd.DataFrame(
             {
                 "A": [2, 4, 6],
@@ -533,16 +651,12 @@ class TestPandasTableManager(unittest.TestCase):
                     [4, 5, 6],
                     [7, 8, 9],
                 ],  # No formatting applied
-                "G": [None, "text", "3.14"],
+                "G": ["None", "text", "3.14"],
             }
         )
-        pd.testing.assert_frame_equal(formatted_data, expected_data)
+        assert_frame_equal(formatted_data, expected_data)
 
     def test_apply_formatting_with_multi_index(self) -> None:
-        import pandas as pd
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
-
         data = pd.DataFrame(
             {
                 "A": [1, 2, 3],
@@ -559,7 +673,7 @@ class TestPandasTableManager(unittest.TestCase):
             "B": lambda x: x.upper(),
         }
 
-        formatted_data = manager.apply_formatting(format_mapping)
+        formatted_data = manager.apply_formatting(format_mapping).data
         expected_data = pd.DataFrame(
             {
                 "A": [2, 4, 6],
@@ -569,13 +683,9 @@ class TestPandasTableManager(unittest.TestCase):
                 [("x", 1), ("y", 2), ("z", 3)], names=["X", "Y"]
             ),
         )
-        pd.testing.assert_frame_equal(formatted_data, expected_data)
+        assert_frame_equal(formatted_data, expected_data)
 
     def test_apply_formatting_with_categorical_data(self) -> None:
-        import pandas as pd
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
-
         data = pd.DataFrame(
             {
                 "A": pd.Categorical(["a", "b", "a"]),
@@ -589,20 +699,16 @@ class TestPandasTableManager(unittest.TestCase):
             "B": lambda x: x * 2,
         }
 
-        formatted_data = manager.apply_formatting(format_mapping)
+        formatted_data = manager.apply_formatting(format_mapping).data
         expected_data = pd.DataFrame(
             {
                 "A": pd.Categorical(["A", "B", "A"]),
                 "B": [2, 4, 6],
             }
         )
-        pd.testing.assert_frame_equal(formatted_data, expected_data)
+        assert_frame_equal(formatted_data, expected_data)
 
     def test_apply_formatting_with_datetime_index(self) -> None:
-        import pandas as pd
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
-
         data = pd.DataFrame(
             {
                 "A": [1, 2, 3],
@@ -617,7 +723,7 @@ class TestPandasTableManager(unittest.TestCase):
             "B": lambda x: x.upper(),
         }
 
-        formatted_data = manager.apply_formatting(format_mapping)
+        formatted_data = manager.apply_formatting(format_mapping).data
         expected_data = pd.DataFrame(
             {
                 "A": [2, 4, 6],
@@ -625,13 +731,9 @@ class TestPandasTableManager(unittest.TestCase):
             },
             index=pd.to_datetime(["2021-01-01", "2021-01-02", "2021-01-03"]),
         )
-        pd.testing.assert_frame_equal(formatted_data, expected_data)
+        assert_frame_equal(formatted_data, expected_data)
 
     def test_apply_formatting_with_complex_data(self) -> None:
-        import pandas as pd
-
-        from marimo._plugins.ui._impl.tables.format import FormatMapping
-
         data = pd.DataFrame(
             {
                 "A": [1, 2, 3],
@@ -660,7 +762,7 @@ class TestPandasTableManager(unittest.TestCase):
             "H": abs,
         }
 
-        formatted_data = manager.apply_formatting(format_mapping)
+        formatted_data = manager.apply_formatting(format_mapping).data
         expected_data = pd.DataFrame(
             {
                 "A": [2, 4, 6],
@@ -673,8 +775,119 @@ class TestPandasTableManager(unittest.TestCase):
                     [4, 5, 6],
                     [7, 8, 9],
                 ],  # No formatting applied
-                "G": [None, "text", "3.14"],
+                "G": ["None", "text", "3.14"],
                 "H": [2.23606797749979, 5.0, 7.810249675906654],
             }
         )
-        pd.testing.assert_frame_equal(formatted_data, expected_data)
+        assert_frame_equal(formatted_data, expected_data)
+
+    def test_apply_formatting_with_none_values(self) -> None:
+        data = pd.DataFrame(
+            {
+                "A": [1, None, 3],
+                "B": [None, "text", None],
+                "C": [1.0, 2.0, None],
+            }
+        )
+        manager = self.factory.create()(data)
+
+        format_mapping: FormatMapping = {
+            "A": lambda x: "N/A" if pd.isna(x) else x * 2,
+            "B": lambda x: "Missing" if pd.isna(x) else x.upper(),
+            "C": lambda x: "---" if pd.isna(x) else f"{x:.2f}",
+        }
+
+        formatted_data = manager.apply_formatting(format_mapping).data
+        expected_data = pd.DataFrame(
+            {
+                "A": [2, "N/A", 6],
+                "B": ["Missing", "TEXT", "Missing"],
+                "C": ["1.00", "2.00", "---"],
+            }
+        )
+        assert_frame_equal(formatted_data, expected_data)
+
+    def test_empty_dataframe(self) -> None:
+        empty_df = pd.DataFrame()
+        empty_manager = self.factory.create()(empty_df)
+        assert empty_manager.get_num_rows() == 0
+        assert empty_manager.get_num_columns() == 0
+        assert empty_manager.get_column_names() == []
+        assert empty_manager.get_field_types() == []
+
+    def test_dataframe_with_all_null_column(self) -> None:
+        df = pd.DataFrame({"A": [1, 2, 3], "B": [None, None, None]})
+        manager = self.factory.create()(df)
+        summary = manager.get_summary("B")
+        assert summary.nulls == 3
+        assert summary.total == 3
+        assert summary.unique is None
+
+    def test_dataframe_with_mixed_types(self) -> None:
+        df = pd.DataFrame({"A": [1, "two", 3.0, True]})
+        manager = self.factory.create()(df)
+        assert manager.get_field_type("A") == ("string", "object")
+
+    def test_search_with_regex(self) -> None:
+        df = pd.DataFrame({"A": ["apple", "banana", "cherry"]})
+        manager = self.factory.create()(df)
+        result = manager.search("^[ab]")
+        assert result.get_num_rows() == 2
+
+    def test_sort_values_with_nulls(self) -> None:
+        df = pd.DataFrame({"A": [3, 1, None, 2]})
+        manager = self.factory.create()(df)
+        sorted_manager = manager.sort_values("A", descending=True)
+        assert sorted_manager.data["A"].to_list()[1:] == [
+            3.0,
+            2.0,
+            1.0,
+        ]
+
+    def test_dataframe_with_multiindex(self) -> None:
+        df = pd.DataFrame(
+            {"A": [1, 2, 3, 4], "B": [5, 6, 7, 8]},
+            index=[["a", "a", "b", "b"], [1, 2, 1, 2]],
+        )
+        manager = self.factory.create()(df)
+        assert manager.get_row_headers() == ["", ""]
+        assert manager.get_num_rows() == 4
+
+    def test_get_field_types_with_datetime(self):
+        import pandas as pd
+
+        data = pd.DataFrame(
+            {
+                "date_col": [
+                    datetime.date(2021, 1, 1),
+                    datetime.date(2021, 1, 2),
+                    datetime.date(2021, 1, 3),
+                ],
+                "datetime_col": [
+                    datetime.datetime(2021, 1, 1),
+                    datetime.datetime(2021, 1, 2),
+                    datetime.datetime(2021, 1, 3),
+                ],
+                "time_col": [
+                    datetime.time(1, 2, 3),
+                    datetime.time(4, 5, 6),
+                    datetime.time(7, 8, 9),
+                ],
+            }
+        )
+        manager = self.factory.create()(data)
+
+        assert manager.get_field_type("date_col") == ("string", "object")
+        assert manager.get_field_type("datetime_col") == (
+            "datetime",
+            "datetime64[ns]",
+        )
+        assert manager.get_field_type("time_col") == ("string", "object")
+
+    def test_get_sample_values(self) -> None:
+        df = pd.DataFrame({"A": [1, 2, 3, 4], "B": ["a", "b", "c", "d"]})
+        manager = self.factory.create()(df)
+        sample_values = manager.get_sample_values("A")
+        assert sample_values == [1, 2, 3]
+        sample_values = manager.get_sample_values("B")
+        assert sample_values == ["a", "b", "c"]

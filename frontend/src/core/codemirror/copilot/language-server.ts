@@ -24,9 +24,14 @@ import type {
   CopilotAcceptCompletionParams,
   CopilotRejectCompletionParams,
 } from "./types";
-import { isCopilotEnabled } from "./state";
+import {
+  isCopilotEnabled,
+  setGitHubCopilotLoadingVersion,
+  clearGitHubCopilotLoadingVersion,
+} from "./state";
 import { getCodes } from "./getCodes";
 import { Logger } from "@/utils/Logger";
+import { throttle } from "lodash-es";
 
 // A map of request methods and their parameters and return types
 export interface LSPRequestMap {
@@ -45,12 +50,17 @@ export interface LSPRequestMap {
 export class CopilotLanguageServerClient extends LanguageServerClient {
   private documentVersion = 0;
 
-  private _request<Method extends keyof LSPRequestMap>(
+  private async _request<Method extends keyof LSPRequestMap>(
     method: Method,
     params: LSPRequestMap[Method][0],
   ): Promise<LSPRequestMap[Method][1]> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (this as any).request(method, params);
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return await (this as any).request(method, params);
+    } catch (error) {
+      Logger.error("CopilotLanguageServerClient#request: Error", error);
+      throw error;
+    }
   }
 
   private isDisabled() {
@@ -103,20 +113,44 @@ export class CopilotLanguageServerClient extends LanguageServerClient {
     return this._request("signOut", {});
   }
 
-  signInInitiate() {
-    return this._request("signInInitiate", {});
+  async signInInitiate() {
+    Logger.log("Copilot#signInInitiate: Starting sign-in flow");
+    try {
+      const result = await this._request("signInInitiate", {});
+      Logger.log("Copilot#signInInitiate: Sign-in flow started successfully");
+      return result;
+    } catch (error) {
+      Logger.warn(
+        "Copilot#signInInitiate: Failed to start sign-in flow",
+        error,
+      );
+      throw error;
+    }
   }
 
-  signInConfirm(params: CopilotSignInConfirmParams) {
-    return this._request("signInConfirm", params);
+  async signInConfirm(params: CopilotSignInConfirmParams) {
+    Logger.log("Copilot#signInConfirm: Confirming sign-in");
+    try {
+      const result = await this._request("signInConfirm", params);
+      Logger.log("Copilot#signInConfirm: Sign-in confirmed successfully");
+      return result;
+    } catch (error) {
+      Logger.warn("Copilot#signInConfirm: Failed to confirm sign-in", error);
+      throw error;
+    }
   }
 
   async signedIn() {
-    const { status, user } = await this._request("checkStatus", {});
-    Logger.debug("Copilot#signedIn", status, user);
-    return (
-      status === "SignedIn" || status === "AlreadySignedIn" || status === "OK"
-    );
+    try {
+      const { status } = await this._request("checkStatus", {});
+      Logger.log("Copilot#signedIn: Status check completed", { status });
+      return (
+        status === "SignedIn" || status === "AlreadySignedIn" || status === "OK"
+      );
+    } catch (error) {
+      Logger.warn("Copilot#signedIn: Failed to check sign-in status", error);
+      throw error;
+    }
   }
 
   // COMPLETIONS
@@ -128,18 +162,56 @@ export class CopilotLanguageServerClient extends LanguageServerClient {
     return this._request("notifyRejected", params);
   }
 
-  async getCompletion(params: CopilotGetCompletionsParams) {
-    if (this.isDisabled()) {
-      return { completions: [] };
-    }
-
-    const version = this.documentVersion;
-
-    return this._request("getCompletions", {
+  private getCompletionInternal = async (
+    params: CopilotGetCompletionsParams,
+    version: number,
+  ): Promise<CopilotGetCompletionsResult> => {
+    return await this._request("getCompletions", {
       doc: {
         ...params.doc,
         version: version,
       },
     });
+  };
+
+  // Even though the copilot extension has a debounce,
+  // there are multiple requests sent at the same time
+  // when multiple Codemirror instances are mounted at the same time.
+  // So we throttle it to ignore multiple requests at the same time.
+  private throttledGetCompletionInternal = throttle(
+    this.getCompletionInternal,
+    200,
+  );
+
+  async getCompletion(
+    params: CopilotGetCompletionsParams,
+  ): Promise<CopilotGetCompletionsResult> {
+    if (this.isDisabled()) {
+      return { completions: [] };
+    }
+
+    const requestVersion = this.documentVersion;
+    params.doc.version = requestVersion;
+
+    // If version is 0, it means the document hasn't been opened yet
+    if (requestVersion === 0) {
+      return { completions: [] };
+    }
+
+    // Start a loading indicator
+    setGitHubCopilotLoadingVersion(requestVersion);
+    const response = await this.throttledGetCompletionInternal(
+      params,
+      requestVersion,
+    );
+    // Stop the loading indicator (only if the version hasn't changed)
+    clearGitHubCopilotLoadingVersion(requestVersion);
+
+    // If the document version has changed since the request was made, return an empty response
+    if (requestVersion !== this.documentVersion) {
+      return { completions: [] };
+    }
+
+    return response || { completions: [] };
   }
 }

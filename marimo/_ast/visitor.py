@@ -2,20 +2,28 @@
 from __future__ import annotations
 
 import ast
+import itertools
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Callable, Literal, Optional, Set, Union
 from uuid import uuid4
 
 from marimo import _loggers
-from marimo._data.sql_visitor import normalize_sql_f_string
+from marimo._ast.sql_visitor import (
+    SQLDefs,
+    find_sql_defs,
+    find_sql_refs,
+    normalize_sql_f_string,
+)
 from marimo._dependencies.dependencies import DependencyManager
 from marimo._utils.variables import is_local
 
 LOGGER = _loggers.marimo_logger()
 
 Name = str
+
+Language = Literal["python", "sql"]
 
 
 @dataclass
@@ -37,7 +45,17 @@ class ImportData:
 
 @dataclass
 class VariableData:
-    kind: Literal["function", "class", "import", "variable"] = "variable"
+    # "table", "view", "schema", and "catalog" are SQL variables, not Python.
+    kind: Literal[
+        "function",
+        "class",
+        "import",
+        "variable",
+        "table",
+        "view",
+        "schema",
+        "catalog",
+    ] = "variable"
 
     # If kind == function or class, it may be dependent on externally defined
     # variables.
@@ -53,6 +71,19 @@ class VariableData:
 
     # For kind == import
     import_data: Optional[ImportData] = None
+
+    @property
+    def language(self) -> Language:
+        return (
+            "sql"
+            if (
+                self.kind == "table"
+                or self.kind == "schema"
+                or self.kind == "view"
+                or self.kind == "catalog"
+            )
+            else "python"
+        )
 
 
 @dataclass
@@ -92,9 +123,29 @@ class RefData:
     parent_blocks: list[Block]
 
 
+NamedNode = Union[
+    ast.Name,
+    ast.ClassDef,
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.arg,
+    ast.Global,
+    "ast.MatchAs",  # type: ignore
+    "ast.MatchMapping",  # type: ignore
+    "ast.MatchStar",  # type: ignore
+    "ast.TypeVar",  # type: ignore
+    "ast.ParamSpec",  # type: ignore
+    "ast.TypeVarTuple",  # type: ignore
+]
+
+
 class ScopedVisitor(ast.NodeVisitor):
     def __init__(
-        self, mangle_prefix: Optional[str] = None, ignore_local: bool = False
+        self,
+        mangle_prefix: Optional[str] = None,
+        ignore_local: bool = False,
+        on_def: Callable[[NamedNode, str, list[Block]], None] | None = None,
+        on_ref: Callable[[NamedNode], None] | None = None,
     ) -> None:
         self.block_stack: list[Block] = [Block()]
         # Names to be loaded into a variable required_refs
@@ -102,6 +153,10 @@ class ScopedVisitor(ast.NodeVisitor):
         self.obscured_scope_stack: list[ObscuredScope] = []
         # Mapping from referenced names to their metadata
         self._refs: dict[Name, RefData] = {}
+        # Function (node, name, block stack) -> None
+        self._on_def = on_def if on_def is not None else lambda *_: None
+        # Function (node) -> None
+        self._on_ref = on_ref if on_ref is not None else lambda *_: None
         # Unique prefix used to mangle cell-local variable names
         self.id = (
             str(uuid4()).replace("-", "_")
@@ -109,6 +164,7 @@ class ScopedVisitor(ast.NodeVisitor):
             else mangle_prefix
         )
         self.is_local = (lambda _: False) if ignore_local else is_local
+        self.language: Language = "python"
 
     @property
     def defs(self) -> set[Name]:
@@ -142,7 +198,9 @@ class ScopedVisitor(ast.NodeVisitor):
             return name
 
     def _get_alias_name(self, node: ast.alias) -> str:
-        """Get the string name of an imported alias
+        """Get the string name of an imported alias.
+
+        Mangles the "as" name if it's a local variable.
 
         NB: We disallow `import *` because Python only allows
         star imports at module-level, but we store cells as functions.
@@ -167,19 +225,24 @@ class ScopedVisitor(ast.NodeVisitor):
                 )
             return basename
         else:
-            return self._if_local_then_mangle(node.asname)
+            node.asname = self._if_local_then_mangle(node.asname)
+            return node.asname
 
     def _is_defined(self, identifier: str) -> bool:
         """Check if `identifier` is defined in any block."""
         return any(block.is_defined(identifier) for block in self.block_stack)
 
-    def _add_ref(self, name: Name, deleted: bool) -> None:
+    def _add_ref(
+        self, node: NamedNode | None, name: Name, deleted: bool
+    ) -> None:
         """Register a referenced name."""
         self._refs[name] = RefData(
             deleted=deleted,
             parent_blocks=self.block_stack[:-1],
         )
         self.ref_stack[-1].add(name)
+        if node is not None:
+            self._on_ref(node)
 
     def _remove_ref(self, name: Name) -> None:
         """Remove a referenced name."""
@@ -208,7 +271,9 @@ class ScopedVisitor(ast.NodeVisitor):
             # `name` was used as a capture, not a reference
             self._remove_ref(name)
 
-    def _define(self, name: Name, variable_data: VariableData) -> None:
+    def _define(
+        self, node: NamedNode | None, name: Name, variable_data: VariableData
+    ) -> None:
         """Define a name in the current block.
 
         Names created with the global keyword are added to the top-level
@@ -216,6 +281,8 @@ class ScopedVisitor(ast.NodeVisitor):
         """
         block_idx = 0 if name in self.block_stack[-1].global_names else -1
         self._define_in_block(name, variable_data, block_idx=block_idx)
+        if node is not None:
+            self._on_def(node, name, self.block_stack)
 
     def _push_block(self, is_comprehension: bool) -> None:
         """Push a block onto the block stack."""
@@ -233,7 +300,7 @@ class ScopedVisitor(ast.NodeVisitor):
         """Pop scope from the stack."""
         self.obscured_scope_stack.pop()
 
-    def generic_visit(self, node: ast.AST) -> None:
+    def generic_visit(self, node: ast.AST) -> ast.AST:
         """Visits the children of node and manages the block stack.
 
         Note: visit calls visit_ClassName, or generic_visit() if the former
@@ -308,6 +375,7 @@ class ScopedVisitor(ast.NodeVisitor):
         else:
             # Other nodes that don't introduce a new scope
             super().generic_visit(node)
+        return node
 
     def _visit_and_get_refs(self, node: ast.AST) -> set[Name]:
         """Create a ref scope for the variable to be declared (e.g. function,
@@ -328,41 +396,59 @@ class ScopedVisitor(ast.NodeVisitor):
         return refs
 
     # ClassDef and FunctionDef nodes don't have ast.Name nodes as children
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:
         node.name = self._if_local_then_mangle(node.name)
         refs = self._visit_and_get_refs(node)
         self._define(
+            node,
             node.name,
             VariableData(kind="class", required_refs=refs),
         )
+        return node
 
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+    def visit_AsyncFunctionDef(
+        self, node: ast.AsyncFunctionDef
+    ) -> ast.AsyncFunctionDef:
         node.name = self._if_local_then_mangle(node.name)
         refs = self._visit_and_get_refs(node)
         self._define(
+            node,
             node.name,
             VariableData(kind="function", required_refs=refs),
         )
+        return node
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
         node.name = self._if_local_then_mangle(node.name)
         refs = self._visit_and_get_refs(node)
         self._define(
+            node,
             node.name,
             VariableData(kind="function", required_refs=refs),
         )
+        return node
 
-    def visit_Call(self, node: ast.Call) -> None:
+    def visit_Call(self, node: ast.Call) -> ast.Call:
         # If the call name is sql and has one argument, and the argument is
         # a string literal, then it's likely to be a SQL query.
-        # It must also come from the `mo` module.
+        # It must also come from the `mo` or `duckdb` module.
+        #
+        # This check is brittle, since we can't detect at parse time whether
+        # 'mo'/'marimo' actually refer to the marimo library, but it gets
+        # the job done.
+        valid_sql_calls = [
+            "marimo.sql",
+            "mo.sql",
+            "duckdb.execute",
+            "duckdb.sql",
+        ]
         if (
             isinstance(node.func, ast.Attribute)
             and isinstance(node.func.value, ast.Name)
-            and (node.func.value.id == "mo" or node.func.value.id == "marimo")
-            and node.func.attr == "sql"
+            and f"{node.func.value.id}.{node.func.attr}" in valid_sql_calls
             and len(node.args) == 1
         ):
+            self.language = "sql"
             first_arg = node.args[0]
             sql: Optional[str] = None
             if isinstance(first_arg, ast.Constant):
@@ -381,54 +467,95 @@ class ScopedVisitor(ast.NodeVisitor):
 
                 # Add all tables in the query to the ref scope
                 try:
+                    # TODO: This function raises a CatalogError on CREATE VIEW
+                    # statements that reference tables that are not yet
+                    # defined, such
+                    #
+                    # as CREATE OR REPLACE VIEW my_view as SELECT * from my_df
+                    #
+                    # This breaks dependency parsing.
                     statements = duckdb.extract_statements(sql)
-                except duckdb.ProgrammingError:
+                except (duckdb.ProgrammingError, duckdb.IOException):
                     # The user's sql query may have a syntax error,
                     # or duckdb failed for an unknown reason; don't
                     # break marimo.
                     self.generic_visit(node)
-                    return
+                    return node
                 except BaseException as e:
                     # We catch base exceptions because we don't want to
                     # fail due to bugs in duckdb -- users code should
                     # be saveable no matter what
                     LOGGER.warning("Unexpected duckdb error %s", e)
                     self.generic_visit(node)
-                    return
+                    return node
 
                 for statement in statements:
+                    tables: Set[str] = set()
+                    from_targets: list[str] = []
+                    # Parse the refs and defs of each statement
                     try:
                         tables = duckdb.get_table_names(statement.query)
-                    except duckdb.ProgrammingError:
-                        self.generic_visit(node)
-                        return
+                    except (duckdb.ProgrammingError, duckdb.IOException):
+                        LOGGER.debug(
+                            "Error parsing SQL statement: %s", statement.query
+                        )
                     except BaseException as e:
                         LOGGER.warning("Unexpected duckdb error %s", e)
-                        self.generic_visit(node)
-                        return
+                    try:
+                        # TODO(akshayka): more comprehensive parsing
+                        # of the statement -- schemas can show up in
+                        # joins, queries, ...
+                        from_targets = find_sql_refs(statement.query)
+                    except (duckdb.ProgrammingError, duckdb.IOException):
+                        LOGGER.debug(
+                            "Error parsing SQL statement: %s", statement.query
+                        )
+                    except BaseException as e:
+                        LOGGER.warning("Unexpected duckdb error %s", e)
 
-                    for table in tables:
-                        # Table may be a URL or something else that
+                    for name in itertools.chain(tables, from_targets):
+                        # Name (table, db) may be a URL or something else that
                         # isn't a Python variable
-                        if table.isidentifier():
-                            self._add_ref(table, deleted=False)
+                        if name.isidentifier():
+                            self._add_ref(None, name, deleted=False)
+
+                    # Add all tables/dbs created in the query to the defs
+                    try:
+                        sql_defs = find_sql_defs(sql)
+                    except duckdb.ProgrammingError:
+                        sql_defs = SQLDefs()
+                    except BaseException as e:
+                        LOGGER.warning("Unexpected duckdb error %s", e)
+                        sql_defs = SQLDefs()
+
+                    for _table in sql_defs.tables:
+                        self._define(None, _table, VariableData("table"))
+                    for _view in sql_defs.views:
+                        self._define(None, _view, VariableData("view"))
+                    for _schema in sql_defs.schemas:
+                        self._define(None, _schema, VariableData("schema"))
+                    for _catalog in sql_defs.catalogs:
+                        self._define(None, _catalog, VariableData("catalog"))
 
         # Visit arguments, keyword args, etc.
         self.generic_visit(node)
+        return node
 
-    def visit_Lambda(self, node: ast.Lambda) -> None:
+    def visit_Lambda(self, node: ast.Lambda) -> ast.Lambda:
         # Inject the dummy name `_lambda` into ref scope to denote there's a
         # callable that might require additional refs.
         self.ref_stack[-1].add("_lambda")
         self.generic_visit(node)
+        return node
 
-    def visit_arg(self, node: ast.arg) -> None:
+    def visit_arg(self, node: ast.arg) -> ast.arg:
         node.arg = self._if_local_then_mangle(node.arg)
-        self._define(node.arg, VariableData(kind="variable"))
+        self._define(node, node.arg, VariableData(kind="variable"))
         if node.annotation is not None:
             self.visit(node.annotation)
+        return node
 
-    def visit_arguments(self, node: ast.arguments) -> None:
+    def visit_arguments(self, node: ast.arguments) -> ast.arguments:
         # process potential refs before defs, to handle patterns like
         #
         # def f(x=x):
@@ -450,8 +577,9 @@ class ScopedVisitor(ast.NodeVisitor):
             self.visit(node.vararg)
         if node.kwarg is not None:
             self.visit(node.kwarg)
+        return node
 
-    def visit_Assign(self, node: ast.Assign) -> None:
+    def visit_Assign(self, node: ast.Assign) -> ast.Assign:
         # Visit the value first, to handle cases like
         #
         # class A:
@@ -464,8 +592,9 @@ class ScopedVisitor(ast.NodeVisitor):
             self.visit(target)
         refs = self.ref_stack.pop()
         self.ref_stack[-1].update(refs)
+        return node
 
-    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+    def visit_AugAssign(self, node: ast.AugAssign) -> ast.AugAssign:
         # Augmented assign (has op)
         # e.g., x += 1
         self.ref_stack.append(set())
@@ -473,8 +602,9 @@ class ScopedVisitor(ast.NodeVisitor):
         self.visit(node.target)
         refs = self.ref_stack.pop()
         self.ref_stack[-1].update(refs)
+        return node
 
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.AnnAssign:
         # Annotated assign
         # e.g., x: int = 0
         self.ref_stack.append(set())
@@ -484,8 +614,23 @@ class ScopedVisitor(ast.NodeVisitor):
         self.visit(node.target)
         refs = self.ref_stack.pop()
         self.ref_stack[-1].update(refs)
+        return node
 
-    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+    def visit_comprehension(
+        self, node: ast.comprehension
+    ) -> ast.comprehension:
+        # process potential refs before defs, to handle patterns like
+        #
+        # [ ... for x in x]
+        #
+        # In defining scoping, Python parses iter first, then target, then ifs
+        self.visit(node.iter)
+        self.visit(node.target)
+        for _if in node.ifs:
+            self.visit(_if)
+        return node
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> ast.NamedExpr:
         self.visit(node.value)
         if self.block_stack[-1].is_comprehension and isinstance(
             node.target, ast.Name
@@ -508,8 +653,9 @@ class ScopedVisitor(ast.NodeVisitor):
                     break
         else:
             self.generic_visit(node)
+        return node
 
-    def visit_Name(self, node: ast.Name) -> None:
+    def visit_Name(self, node: ast.Name) -> ast.Name:
         # NB: AugAssign has a Store ctx; this means that mutating a var
         # will create a def, which we can catch as an error later if
         # that var was defined by another cell
@@ -531,11 +677,12 @@ class ScopedVisitor(ast.NodeVisitor):
         for scope in self.obscured_scope_stack:
             if node.id == scope.obscured:
                 self.generic_visit(node)
-                return
+                return node
 
         if isinstance(node.ctx, ast.Store):
             node.id = self._if_local_then_mangle(node.id)
             self._define(
+                node,
                 node.id,
                 VariableData(
                     kind="variable", required_refs=self.ref_stack[-1]
@@ -546,13 +693,13 @@ class ScopedVisitor(ast.NodeVisitor):
             and not self._is_defined(node.id)
             and not self.is_local(node.id)
         ):
-            self._add_ref(node.id, deleted=False)
+            self._add_ref(node, node.id, deleted=False)
         elif (
             isinstance(node.ctx, ast.Del)
             and not self._is_defined(node.id)
             and not self.is_local(node.id)
         ):
-            self._add_ref(node.id, deleted=True)
+            self._add_ref(node, node.id, deleted=True)
         elif self.is_local(node.id):
             mangled_name = self._if_local_then_mangle(
                 node.id, ignore_scope=True
@@ -564,6 +711,11 @@ class ScopedVisitor(ast.NodeVisitor):
                     node.id = mangled_name
                 elif block.is_defined(node.id):
                     break
+        else:
+            # Not a reference; ast.Load, ast.Del on a variable that's already
+            # defined; invoke the callback
+            if node is not None:
+                self._on_def(node, node.id, self.block_stack)
 
         # Handle refs on the block scope level, or capture cell level
         # references.
@@ -579,20 +731,23 @@ class ScopedVisitor(ast.NodeVisitor):
             self.ref_stack[-1].add(node.id)
 
         self.generic_visit(node)
+        return node
 
-    def visit_Global(self, node: ast.Global) -> None:
+    def visit_Global(self, node: ast.Global) -> ast.Global:
         node.names = [
             self._if_local_then_mangle(name, ignore_scope=True)
             for name in node.names
         ]
         for name in node.names:
             self.block_stack[-1].global_names.add(name)
-            self._add_ref(name, deleted=False)
+            self._add_ref(node, name, deleted=False)
+        return node
 
-    def visit_Import(self, node: ast.Import) -> None:
+    def visit_Import(self, node: ast.Import) -> ast.Import:
         for alias_node in node.names:
             variable_name = self._get_alias_name(alias_node)
             self._define(
+                None,
                 variable_name,
                 VariableData(
                     kind="import",
@@ -603,8 +758,9 @@ class ScopedVisitor(ast.NodeVisitor):
                     ),
                 ),
             )
+        return node
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> ast.ImportFrom:
         module = node.module if node.module is not None else ""
         # we don't recurse into the alias nodes, since we define the
         # aliases here
@@ -612,6 +768,7 @@ class ScopedVisitor(ast.NodeVisitor):
             variable_name = self._get_alias_name(alias_node)
             original_name = alias_node.name
             self._define(
+                None,
                 variable_name,
                 VariableData(
                     kind="import",
@@ -623,6 +780,7 @@ class ScopedVisitor(ast.NodeVisitor):
                     ),
                 ),
             )
+        return node
 
     if sys.version_info >= (3, 10):
         # Match statements were introduced in Python 3.10
@@ -632,21 +790,26 @@ class ScopedVisitor(ast.NodeVisitor):
         # we don't know the value of the match subject), even though only a
         # subset of the names will be bound at runtime. For this reason, in
         # marimo, match statements should really only be used in local scopes.
-        def visit_MatchAs(self, node: ast.MatchAs) -> None:
+        def visit_MatchAs(self, node: ast.MatchAs) -> ast.MatchAs:
             if node.name is not None:
                 node.name = self._if_local_then_mangle(node.name)
                 self._define(
+                    node,
                     node.name,
                     VariableData(kind="variable"),
                 )
             if node.pattern is not None:
                 # pattern may contain additional MatchAs statements in it
                 self.visit(node.pattern)
+            return node
 
-        def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+        def visit_MatchMapping(
+            self, node: ast.MatchMapping
+        ) -> ast.MatchMapping:
             if node.rest is not None:
                 node.rest = self._if_local_then_mangle(node.rest)
                 self._define(
+                    node,
                     node.rest,
                     VariableData(kind="variable"),
                 )
@@ -654,20 +817,24 @@ class ScopedVisitor(ast.NodeVisitor):
                 self.visit(key)
             for pattern in node.patterns:
                 self.visit(pattern)
+            return node
 
-        def visit_MatchStar(self, node: ast.MatchStar) -> None:
+        def visit_MatchStar(self, node: ast.MatchStar) -> ast.MatchStar:
             if node.name is not None:
                 node.name = self._if_local_then_mangle(node.name)
                 self._define(
+                    node,
                     node.name,
                     VariableData(kind="variable"),
                 )
+            return node
 
     if sys.version_info >= (3, 12):
 
-        def visit_TypeVar(self, node: ast.TypeVar) -> None:
+        def visit_TypeVar(self, node: ast.TypeVar) -> ast.TypeVar:
             # node.name is a str, not an ast.Name node
             self._define(
+                node,
                 node.name,
                 VariableData(
                     kind="variable", required_refs=self.ref_stack[-1]
@@ -678,21 +845,28 @@ class ScopedVisitor(ast.NodeVisitor):
                     self.visit(name)
             elif node.bound is not None:
                 self.visit(node.bound)
+            return node
 
-        def visit_ParamSpec(self, node: ast.ParamSpec) -> None:
+        def visit_ParamSpec(self, node: ast.ParamSpec) -> ast.ParamSpec:
             # node.name is a str, not an ast.Name node
             self._define(
+                node,
                 node.name,
                 VariableData(
                     kind="variable", required_refs=self.ref_stack[-1]
                 ),
             )
+            return node
 
-        def visit_TypeVarTuple(self, node: ast.TypeVarTuple) -> None:
+        def visit_TypeVarTuple(
+            self, node: ast.TypeVarTuple
+        ) -> ast.TypeVarTuple:
             # node.name is a str, not an ast.Name node
             self._define(
+                node,
                 node.name,
                 VariableData(
                     kind="variable", required_refs=self.ref_stack[-1]
                 ),
             )
+            return node

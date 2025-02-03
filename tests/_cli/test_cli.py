@@ -8,6 +8,7 @@ Requires frontend to be built
 from __future__ import annotations
 
 import contextlib
+import inspect
 import os
 import signal
 import socket
@@ -17,14 +18,19 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Generator, Iterator, Optional
 
 import pytest
 
 from marimo import __version__
 from marimo._ast import codegen
 from marimo._ast.cell import CellConfig
+from marimo._dependencies.dependencies import DependencyManager
 from marimo._utils.config.config import ROOT_DIR as CONFIG_ROOT_DIR
+
+HAS_UV = DependencyManager.which("uv")
+
+DIR_PATH = os.path.dirname(os.path.realpath(__file__))
 
 
 def _is_win32() -> bool:
@@ -52,14 +58,14 @@ def _patch_signals_win32() -> Iterator[None]:
             signal.signal(signal.SIGINT, old_handler)
 
 
-def _interrupt(process: subprocess.Popen) -> None:
+def _interrupt(process: subprocess.Popen[Any]) -> None:
     if _is_win32():
         os.kill(process.pid, signal.CTRL_C_EVENT)
     else:
         os.kill(process.pid, signal.SIGINT)
 
 
-def _confirm_shutdown(process: subprocess.Popen) -> None:
+def _confirm_shutdown(process: subprocess.Popen[Any]) -> None:
     if _is_win32():
         process.stdin.write(b"y\r\n")
     else:
@@ -68,7 +74,8 @@ def _confirm_shutdown(process: subprocess.Popen) -> None:
 
 
 def _check_shutdown(
-    process: subprocess.Popen, check_fn: Optional[Callable[[int], bool]] = None
+    process: subprocess.Popen[Any],
+    check_fn: Optional[Callable[[int], bool]] = None,
 ) -> None:
     max_tries = 3
     tries = 0
@@ -84,24 +91,23 @@ def _check_shutdown(
 def _try_fetch(
     port: int, host: str = "localhost", token: Optional[str] = None
 ) -> Optional[bytes]:
-    contents = None
     for _ in range(10):
         try:
             url = f"http://{host}:{port}"
             if token is not None:
                 url = f"{url}?access_token={token}"
-            contents = urllib.request.urlopen(url).read()
-            break
+            return urllib.request.urlopen(url).read()
         except Exception:
             time.sleep(0.5)
-    return contents
+    print("Failed to fetch contents")
+    return None
 
 
 def _check_started(port: int, host: str = "localhost") -> Optional[bytes]:
     assert _try_fetch(port, host) is not None
 
 
-def _temp_run_file(directory: tempfile.TemporaryDirectory) -> str:
+def _temp_run_file(directory: tempfile.TemporaryDirectory[str]) -> str:
     filecontents = codegen.generate_filecontents(
         ["import marimo as mo"], ["one"], cell_configs=[CellConfig()]
     )
@@ -112,7 +118,7 @@ def _temp_run_file(directory: tempfile.TemporaryDirectory) -> str:
 
 
 def _check_contents(
-    p: subprocess.Popen,  # type: ignore
+    p: subprocess.Popen[Any],  # type: ignore
     phrase: bytes,
     contents: Optional[bytes],
 ) -> None:
@@ -136,7 +142,7 @@ def _get_port() -> int:
     raise OSError("Could not find an unused port.")
 
 
-def _read_toml(filepath: str) -> Optional[dict]:
+def _read_toml(filepath: str) -> Optional[dict[str, Any]]:
     import tomlkit
 
     if not os.path.exists(filepath):
@@ -145,11 +151,46 @@ def _read_toml(filepath: str) -> Optional[dict]:
         return tomlkit.parse(file.read())
 
 
+@pytest.fixture
+def temp_marimo_file_with_inline_metadata() -> Generator[str, None, None]:
+    tmp_dir = tempfile.TemporaryDirectory()
+    tmp_file = os.path.join(tmp_dir.name, "notebook.py")
+    content = inspect.cleandoc(
+        """
+        # /// script
+        # requires-python = ">=3.11"
+        # dependencies = ["polars"]
+        # ///
+
+        import marimo
+        app = marimo.App()
+
+        @app.cell
+        def __():
+            import marimo as mo
+            return mo,
+
+        @app.cell
+        def __(mo):
+            slider = mo.ui.slider(0, 10)
+            return slider,
+
+        if __name__ == "__main__":
+            app.run()
+        """
+    )
+
+    try:
+        with open(tmp_file, "w") as f:
+            f.write(content)
+        yield tmp_file
+    finally:
+        tmp_dir.cleanup()
+
+
 def test_cli_help_exit_code() -> None:
     # smoke test: makes sure CLI starts
     # helpful for catching issues related to
-    # Python 3.8 compatibility, such as forgetting `from __future__` import
-    # annotations
     p = subprocess.run(["marimo", "--help"])
     assert p.returncode == 0
 
@@ -157,8 +198,6 @@ def test_cli_help_exit_code() -> None:
 def test_cli_edit_none() -> None:
     # smoke test: makes sure CLI starts and has basic things we expect
     # helpful for catching issues related to
-    # Python 3.8 compatibility, such as forgetting `from __future__` import
-    # annotations
     port = _get_port()
     p = subprocess.Popen(
         [
@@ -182,8 +221,6 @@ def test_cli_edit_none() -> None:
 def test_cli_edit_token() -> None:
     # smoke test: makes sure CLI starts and has basic things we expect
     # helpful for catching issues related to
-    # Python 3.8 compatibility, such as forgetting `from __future__` import
-    # annotations
     port = _get_port()
     p = subprocess.Popen(
         [
@@ -493,6 +530,99 @@ def test_cli_custom_host() -> None:
     _check_contents(p, b"marimo-mode data-mode='edit'", contents)
 
 
+@pytest.mark.skipif(not HAS_UV, reason="uv is required for sandbox tests")
+def test_cli_sandbox_edit(temp_marimo_file: str) -> None:
+    port = _get_port()
+    p = subprocess.Popen(
+        [
+            "marimo",
+            "edit",
+            temp_marimo_file,
+            "-p",
+            str(port),
+            "--headless",
+            "--no-token",
+            "--sandbox",
+        ]
+    )
+    contents = _try_fetch(port)
+    _check_contents(p, b"marimo-mode data-mode='edit'", contents)
+
+
+@pytest.mark.skipif(not HAS_UV, reason="uv is required for sandbox tests")
+def test_cli_sandbox_edit_new_file() -> None:
+    port = _get_port()
+    d = tempfile.TemporaryDirectory()
+    path = os.path.join(d.name, "new_sandbox_file.py")
+    p = subprocess.Popen(
+        [
+            "marimo",
+            "edit",
+            path,
+            "-p",
+            str(port),
+            "--headless",
+            "--no-token",
+            "--sandbox",
+        ]
+    )
+    contents = _try_fetch(port)
+    _check_contents(p, b"marimo-mode data-mode='edit'", contents)
+
+
+@pytest.mark.skipif(not HAS_UV, reason="uv is required for sandbox tests")
+def test_cli_sandbox_run(temp_marimo_file: str) -> None:
+    port = _get_port()
+    p = subprocess.Popen(
+        [
+            "marimo",
+            "run",
+            temp_marimo_file,
+            "-p",
+            str(port),
+            "--headless",
+            "--sandbox",
+        ]
+    )
+    contents = _try_fetch(port)
+    _check_contents(p, b"marimo-mode data-mode='read'", contents)
+
+
+@pytest.mark.skipif(not HAS_UV, reason="uv is required for sandbox tests")
+def test_cli_sandbox_run_with_python_version(
+    temp_marimo_file_with_inline_metadata: str,
+) -> None:
+    port = _get_port()
+    p = subprocess.Popen(
+        [
+            "marimo",
+            "run",
+            temp_marimo_file_with_inline_metadata,
+            "-p",
+            str(port),
+            "--headless",
+            "--sandbox",
+        ],
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+    contents = _try_fetch(port)
+
+    # If fetch fails, capture and print server output for debugging
+    if contents is None:
+        stdout, stderr = p.communicate(timeout=5)
+        raise AssertionError(
+            f"Server failed to start. stdout:\n{stdout}\nstderr:\n{stderr}"
+        )
+
+    _check_contents(p, b"marimo-mode data-mode='read'", contents)
+
+    p.terminate()
+    p.wait(timeout=5)
+
+
 @pytest.mark.xfail(condition=_is_win32(), reason="flaky on Windows")
 def test_cli_edit_interrupt_twice() -> None:
     # two SIGINTs should kill the CLI
@@ -554,6 +684,7 @@ def test_cli_edit_shutdown() -> None:
     with _patch_signals_win32():
         _interrupt(p)
         assert p.poll() is None
+
         assert p.stdin is not None
         _confirm_shutdown(p)
         _check_shutdown(p)
@@ -577,3 +708,155 @@ def test_cli_run_shutdown() -> None:
         p.stdin.flush()
         time.sleep(3)
         assert p.poll() == 0
+
+
+def test_cli_edit_sandbox_prompt() -> None:
+    port = _get_port()
+    path = os.path.join(DIR_PATH, "cli_data", "sandbox.py")
+    p = subprocess.Popen(
+        [
+            "marimo",
+            "edit",
+            path,
+            "--headless",
+            "--no-token",
+            "--skip-update-check",
+            "-p",
+            str(port),
+        ],
+        stdin=subprocess.PIPE,
+    )
+    assert p.poll() is None
+    assert p.stdin is not None
+    p.stdin.write(b"y\n")
+    p.stdin.flush()
+    _check_started(port)
+    p.kill()
+
+
+def test_cli_run_sandbox_prompt() -> None:
+    port = _get_port()
+    path = os.path.join(DIR_PATH, "cli_data", "sandbox.py")
+    p = subprocess.Popen(
+        [
+            "marimo",
+            "run",
+            path,
+            "--headless",
+            "--no-token",
+            "-p",
+            str(port),
+        ],
+        stdin=subprocess.PIPE,
+    )
+    assert p.poll() is None
+    assert p.stdin is not None
+    p.stdin.write(b"y\n")
+    p.stdin.flush()
+    _check_started(port)
+    p.kill()
+
+
+def test_cli_edit_sandbox_prompt_yes() -> None:
+    port = _get_port()
+    path = os.path.join(DIR_PATH, "cli_data", "sandbox.py")
+    p = subprocess.Popen(
+        [
+            "marimo",
+            "-y",
+            "edit",
+            path,
+            "--headless",
+            "--no-token",
+            "--skip-update-check",
+            "-p",
+            str(port),
+        ],
+    )
+    assert p.poll() is None
+    _check_started(port)
+    p.kill()
+
+
+def test_cli_run_sandbox_prompt_yes() -> None:
+    port = _get_port()
+    path = os.path.join(DIR_PATH, "cli_data", "sandbox.py")
+    p = subprocess.Popen(
+        [
+            "marimo",
+            "-y",
+            "run",
+            path,
+            "--headless",
+            "--no-token",
+            "-p",
+            str(port),
+        ],
+    )
+    assert p.poll() is None
+    _check_started(port)
+    p.kill()
+
+
+# shell-completion has 1 input (value of $SHELL) & 3 outputs (return code, stdout, & stderr)
+# parameterize to give coverage. We use a boolean to specify if output on that stream should be present.
+@pytest.mark.parametrize(
+    "shell,rc,expect_stdout,expect_stderr".split(","),
+    [
+        # valid shell values, rc of 0, data only on stdout
+        ("bash", 0, True, False),
+        ("bash.exe", 0, True, False),
+        ("/usr/bin/zsh", 0, True, False),
+        pytest.param(
+            r"c:\spam\eggs\fish.exe",
+            0,
+            True,
+            False,
+            marks=pytest.mark.skipif(
+                not sys.platform.startswith(("win32", "cygwin")),
+                reason="win32 only",
+            ),
+        ),
+        # invalid shell values, rc of 0, data only on stderr
+        ("bogus", 2, False, True),
+        ("", 2, False, True),  # usage error displayed
+    ],
+)
+def test_shell_completion(
+    shell: str, rc: int, expect_stdout: bool, expect_stderr: bool
+) -> None:
+    test_env = os.environ.copy()
+    test_env["SHELL"] = shell
+    p = subprocess.run(
+        ["marimo", "shell-completion"],
+        capture_output=True,
+        env=test_env,
+    )
+    assert p.returncode == rc
+    assert bool(len(p.stdout)) == expect_stdout
+    assert bool(len(p.stderr)) == expect_stderr
+
+
+HAS_DOCKER = DependencyManager.which("docker")
+
+
+@pytest.mark.skipif(
+    HAS_DOCKER, reason="docker is required to be not installed"
+)
+def test_cli_run_docker_remote_url():
+    remote_url = "https://example.com/notebook.py"
+    p = subprocess.Popen(
+        [
+            "marimo",
+            "-y",
+            "edit",
+            remote_url,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    # Should fail with missing docker
+    assert p.returncode != 0
+    assert p.stdout is not None
+    assert "Docker is not installed" in p.stdout.read().decode()

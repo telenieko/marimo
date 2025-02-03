@@ -4,9 +4,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta  # noqa: TCH003
 from decimal import Decimal
-from typing import List, Literal, Optional, Union
+from typing import Any, List, Literal, Optional, Union
 
-DataType = Literal["string", "boolean", "integer", "number", "date", "unknown"]
+DataType = Literal[
+    "string",
+    "boolean",
+    "integer",
+    "number",
+    "date",
+    "datetime",
+    "time",
+    "unknown",
+]
 # This is the data type based on the source library
 # e.g. polars, pandas, numpy, etc.
 ExternalDataType = str
@@ -25,9 +34,10 @@ class DataTableColumn:
     name: str
     type: DataType
     external_type: ExternalDataType
+    sample_values: List[Any]
 
 
-DataTableSource = Literal["local", "duckdb"]
+DataTableSource = Literal["local", "duckdb", "connection"]
 
 
 @dataclass
@@ -81,3 +91,21 @@ class ColumnSummary:
     # p50 is the median
     p75: Optional[NonNestedLiteral] = None
     p95: Optional[NonNestedLiteral] = None
+
+
+@dataclass
+class DataSourceConnection:
+    """
+    Represents a data source connection.
+
+    Attributes:
+        source (str): The source of the data source connection. E.g 'postgres'.
+        dialect (str): The dialect of the data source connection. E.g 'postgresql'.
+        name (str): The name of the data source connection. E.g 'engine'.
+        display_name (str): The display name of the data source connection. E.g 'PostgresQL (engine)'.
+    """
+
+    source: str
+    dialect: str
+    name: str
+    display_name: str

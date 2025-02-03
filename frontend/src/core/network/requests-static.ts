@@ -37,6 +37,7 @@ export function createStaticRequests(): EditRequests & RunRequests {
     sendRunScratchpad: throwNotInEditMode,
     sendRename: throwNotInEditMode,
     sendSave: throwNotInEditMode,
+    sendCopy: throwNotInEditMode,
     sendInterrupt: throwNotInEditMode,
     sendShutdown: throwNotInEditMode,
     sendFormat: throwNotInEditMode,
@@ -57,6 +58,7 @@ export function createStaticRequests(): EditRequests & RunRequests {
     sendRenameFileOrFolder: throwNotInEditMode,
     sendUpdateFile: throwNotInEditMode,
     sendFileDetails: throwNotInEditMode,
+    openTutorial: throwNotInEditMode,
     sendInstallMissingPackages: throwNotInEditMode,
     getRecentFiles: throwNotInEditMode,
     getWorkspaceFiles: throwNotInEditMode,
@@ -64,5 +66,11 @@ export function createStaticRequests(): EditRequests & RunRequests {
     shutdownSession: throwNotInEditMode,
     exportAsHTML: throwNotInEditMode,
     exportAsMarkdown: throwNotInEditMode,
+    autoExportAsHTML: throwNotInEditMode,
+    autoExportAsMarkdown: throwNotInEditMode,
+    autoExportAsIPYNB: throwNotInEditMode,
+    addPackage: throwNotInEditMode,
+    removePackage: throwNotInEditMode,
+    getPackageList: throwNotInEditMode,
   };
 }

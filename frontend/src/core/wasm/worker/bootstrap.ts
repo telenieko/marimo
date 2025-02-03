@@ -1,19 +1,25 @@
 /* Copyright 2024 Marimo. All rights reserved. */
-import type { PyodideInterface } from "pyodide";
+import { loadPyodide, type PyodideInterface } from "pyodide";
 import { WasmFileSystem } from "./fs";
 import { Logger } from "../../../utils/Logger";
 import type { SerializedBridge, WasmController } from "./types";
 import { invariant } from "../../../utils/invariant";
 import type { UserConfig } from "@/core/config/config-schema";
-import { getMarimoWheel } from "./getMarimoWheel";
 import type { OperationMessage } from "@/core/kernel/messages";
 import type { JsonString } from "@/utils/json/base64";
 import { t } from "./tracer";
 
-declare let loadPyodide: (opts: {
-  packages: string[];
-  indexURL: string;
-}) => Promise<PyodideInterface>;
+const MAKE_SNAPSHOT = false;
+
+// This class initializes the wasm environment
+// We would like this initialization to be parallelizable
+// however, there is some waterfall in the initialization process
+// 1. Load Pyodide
+// 2. Install marimo and its required dependencies
+// 3. Install the dependencies from the notebook
+//   3.a Install from pyodide supported wheels
+//   3.b Install from micropip
+// 4. Initialize the notebook
 
 export class DefaultWasmController implements WasmController {
   protected pyodide: PyodideInterface | null = null;
@@ -27,90 +33,50 @@ export class DefaultWasmController implements WasmController {
     version: string;
     pyodideVersion: string;
   }): Promise<PyodideInterface> {
-    const pyodide = await this.loadPyoideAndPackages(opts.pyodideVersion);
+    const pyodide = await this.loadPyodideAndPackages(opts);
 
-    const { version } = opts;
-
-    // If is a dev release, we need to install from test.pypi.org
-    if (version.includes("dev")) {
-      await this.installDevMarimoAndDeps(pyodide, version);
-      return pyodide;
+    if (MAKE_SNAPSHOT) {
+      const snapshot = pyodide.makeMemorySnapshot();
+      Logger.log("Snapshot size (mb):", snapshot.byteLength / 1024 / 1024);
     }
-
-    await this.installMarimoAndDeps(pyodide, version);
 
     return pyodide;
   }
 
-  private async loadPyoideAndPackages(
-    pyodideVersion: string,
-  ): Promise<PyodideInterface> {
+  private async loadPyodideAndPackages(opts: {
+    version: string;
+    pyodideVersion: string;
+  }): Promise<PyodideInterface> {
     if (!loadPyodide) {
       throw new Error("loadPyodide is not defined");
     }
     // Load pyodide and packages
     const span = t.startSpan("loadPyodide");
-    const pyodide = await loadPyodide({
-      // Perf: These get loaded while pyodide is being bootstrapped
-      // The packages can be found here: https://pyodide.org/en/stable/usage/packages-in-pyodide.html
-      packages: ["micropip", "docutils", "Pygments", "jedi", "pyodide-http"],
-      // Without this, this fails in Firefox with
-      // `Could not extract indexURL path from pyodide module`
-      // This fixes for Firefox and does not break Chrome/others
-      indexURL: `https://cdn.jsdelivr.net/pyodide/${pyodideVersion}/full/`,
-    });
-    this.pyodide = pyodide;
-    span.end("ok");
-    return pyodide;
-  }
-
-  private async installDevMarimoAndDeps(
-    pyodide: PyodideInterface,
-    version: string,
-  ) {
-    const span = t.startSpan("installDevMarimoAndDeps");
-    await Promise.all([
-      pyodide.runPythonAsync(`
-      import micropip
-      await micropip.install(
-        [
-          "${getMarimoWheel(version)}",
+    try {
+      const pyodide = await loadPyodide({
+        // Perf: These get loaded while pyodide is being bootstrapped
+        packages: [
+          "micropip",
+          "marimo-base",
+          "Markdown",
+          "pymdown-extensions",
+          "narwhals",
+          "packaging",
         ],
-        deps=False,
-        index_urls="https://test.pypi.org/pypi/{package_name}/json"
-        );
-      `),
-      pyodide.runPythonAsync(`
-      import micropip
-      await micropip.install(
-        [
-          "Markdown==3.6",
-          "pymdown-extensions==10.8.1",
-        ],
-        deps=False,
-        );
-      `),
-    ]);
-    span.end("ok");
-  }
-
-  private async installMarimoAndDeps(
-    pyodide: PyodideInterface,
-    version: string,
-  ) {
-    const span = t.startSpan("installMarimoAndDeps");
-    await pyodide.runPythonAsync(`
-      import micropip
-      await micropip.install(
-        [
-          "${getMarimoWheel(version)}",
-          "Markdown==3.6",
-          "pymdown-extensions==10.8.1",
-        ],
-        deps=False,
-      );
-    `);
-    span.end("ok");
+        _makeSnapshot: MAKE_SNAPSHOT,
+        lockFileURL: `https://wasm.marimo.app/pyodide-lock.json?v=${opts.version}&pyodide=${opts.pyodideVersion}`,
+        // Without this, this fails in Firefox with
+        // `Could not extract indexURL path from pyodide module`
+        // This fixes for Firefox and does not break Chrome/others
+        indexURL: `https://cdn.jsdelivr.net/pyodide/${opts.pyodideVersion}/full/`,
+      });
+      this.pyodide = pyodide;
+      span.end("ok");
+      return pyodide;
+    } catch (error) {
+      Logger.error("Failed to load Pyodide", error);
+      throw error;
+    }
   }
 
   async mountFilesystem(opts: { code: string; filename: string | null }) {
@@ -148,7 +114,8 @@ export class DefaultWasmController implements WasmController {
     self.user_config = userConfig;
 
     const span = t.startSpan("startSession.runPython");
-    const [bridge, init] = this.requirePyodide.runPython(
+    const nbFilename = filename || WasmFileSystem.NOTEBOOK_FILENAME;
+    const [bridge, init, packages] = this.requirePyodide.runPython(
       `
       print("[py] Starting marimo...")
       import asyncio
@@ -159,41 +126,90 @@ export class DefaultWasmController implements WasmController {
       assert js.query_params, "query_params is not defined"
 
       session, bridge = create_session(
-        filename="${filename || WasmFileSystem.NOTEBOOK_FILENAME}",
+        filename="${nbFilename}",
         query_params=js.query_params.to_py(),
         message_callback=js.messenger.callback,
         user_config=js.user_config.to_py(),
       )
 
       def init(auto_instantiate=True):
-        if auto_instantiate:
-          instantiate(session)
+        instantiate(session, auto_instantiate)
         asyncio.create_task(session.start())
 
-      bridge, init`,
+      # Find the packages to install
+      with open("${nbFilename}", "r") as f:
+        packages = session.find_packages(f.read())
+
+      bridge, init, packages`,
     );
     span.end();
 
-    // Fire and forgot load packages and instantiation
+    const foundPackages = new Set<string>(packages.toJs());
+
+    // Fire and forget:
+    // Load notebook dependencies and instantiate the session
     // We don't want to wait for this to finish,
-    // as it blocks the initial code from being shown.
-    let codeForPackages = code;
-    if (codeForPackages.includes("mo.sql")) {
-      // Add pandas and duckdb to the codeForPackages
-      codeForPackages = `import pandas\n${codeForPackages}`;
-      codeForPackages = `import duckdb\n${codeForPackages}`;
-    }
-    const loadSpan = t.startSpan("loadPackagesFromImports");
-    void this.requirePyodide
-      .loadPackagesFromImports(codeForPackages, {
-        messageCallback: Logger.log,
-        errorCallback: Logger.error,
-      })
-      .then(() => {
-        loadSpan.end();
-        init(userConfig.runtime.auto_instantiate);
-      });
+    // so we can show the initial code immediately giving
+    // a sense of responsiveness.
+    void this.loadNotebookDeps(code, foundPackages).then(() => {
+      return init(userConfig.runtime.auto_instantiate);
+    });
 
     return bridge;
+  }
+
+  private async loadNotebookDeps(code: string, foundPackages: Set<string>) {
+    const pyodide = this.requirePyodide;
+
+    if (code.includes("mo.sql")) {
+      // We need pandas and duckdb for mo.sql
+      code = `import pandas\n${code}`;
+      code = `import duckdb\n${code}`;
+    }
+
+    // Add:
+    // 1. additional dependencies of marimo that are lazily loaded.
+    // 2. pyodide-http, a patch to make basic http requests work in pyodide
+    //
+    // These packages are included with Pyodide, which is why we don't add them
+    // to `foundPackages`:
+    // https://pyodide.org/en/stable/usage/packages-in-pyodide.html
+    code = `import docutils\n${code}`;
+    code = `import pygments\n${code}`;
+    code = `import jedi\n${code}`;
+    code = `import pyodide_http\n${code}`;
+
+    const imports = [...foundPackages];
+
+    // Load from pyodide
+    let loadSpan = t.startSpan("pyodide.loadPackage");
+    await pyodide.loadPackagesFromImports(code, {
+      errorCallback: Logger.error,
+      messageCallback: Logger.log,
+    });
+    loadSpan.end();
+
+    // Load from micropip
+    loadSpan = t.startSpan("micropip.install");
+    const missingPackages = imports.filter(
+      (pkg) => !pyodide.loadedPackages[pkg],
+    );
+    if (missingPackages.length > 0) {
+      await pyodide
+        .runPythonAsync(`
+        import micropip
+        import sys
+        # Filter out builtins
+        missing = [p for p in ${JSON.stringify(missingPackages)} if p not in sys.modules]
+        if len(missing) > 0:
+          print("Loading from micropip:", missing)
+          await micropip.install(missing)
+      `)
+        .catch((error) => {
+          // Don't let micropip loading failures stop the notebook from loading
+          Logger.error("Failed to load packages from micropip", error);
+        });
+    }
+    loadSpan.end();
   }
 }

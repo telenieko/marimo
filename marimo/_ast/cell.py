@@ -4,16 +4,19 @@ from __future__ import annotations
 import ast
 import dataclasses
 import inspect
+import os
+from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any, Literal, Mapping, Optional
 
-from marimo._ast.visitor import ImportData, Name, VariableData
-from marimo._data.sql_visitor import SQLVisitor
+from marimo._ast.sql_visitor import SQLVisitor
+from marimo._ast.visitor import ImportData, Language, Name, VariableData
+from marimo._runtime.exceptions import MarimoRuntimeException
 from marimo._utils.deep_merge import deep_merge
 
 CellId_t = str
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Iterable
+    from collections.abc import Iterable
     from types import CodeType
 
     from marimo._ast.app import InternalApp
@@ -23,6 +26,8 @@ if TYPE_CHECKING:
 
 @dataclasses.dataclass
 class CellConfig:
+    column: Optional[int] = None
+
     # If True, the cell and its descendants cannot be executed,
     # but they can still be added to the graph.
     disabled: bool = False
@@ -36,6 +41,16 @@ class CellConfig:
 
     def asdict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
+
+    def asdict_without_defaults(self) -> dict[str, Any]:
+        return {
+            k: v
+            for k, v in self.asdict().items()
+            if v != getattr(CellConfig(), k)
+        }
+
+    def is_different_from_default(self) -> bool:
+        return self != CellConfig()
 
     def configure(self, update: dict[str, Any] | CellConfig) -> None:
         """Update the config in-place.
@@ -131,11 +146,16 @@ class CellImpl:
     mod: ast.Module
     defs: set[Name]
     refs: set[Name]
+    # Variables that should only live for the duration of the cell
+    temporaries: set[Name]
+
     # metadata about definitions
     variable_data: dict[Name, list[VariableData]]
     deleted_refs: set[Name]
     body: Optional[CodeType]
     last_expr: Optional[CodeType]
+    # whether this cell is Python or SQL
+    language: Language
     # unique id
     cell_id: CellId_t
 
@@ -159,6 +179,9 @@ class CellImpl:
     _sqls: ParsedSQLStatements = dataclasses.field(
         default_factory=ParsedSQLStatements
     )
+    _raw_sqls: ParsedSQLStatements = dataclasses.field(
+        default_factory=ParsedSQLStatements
+    )
 
     def configure(self, update: dict[str, Any] | CellConfig) -> CellImpl:
         """Update the cell config.
@@ -170,27 +193,55 @@ class CellImpl:
 
     @property
     def runtime_state(self) -> Optional[RuntimeStateType]:
+        """Gets the current runtime state of the cell.
+
+        Returns:
+            Optional[RuntimeStateType]: The current state, one of:
+                - "idle": cell has run with latest inputs
+                - "queued": cell is queued to run
+                - "running": cell is running
+                - "disabled-transitively": cell is disabled because a parent is disabled
+                - None: state not set
+        """
         return self._status.state
 
     @property
     def run_result_status(self) -> Optional[RunResultStatusType]:
         return self._run_result_status.state
 
+    def _get_sqls(self, raw: bool = False) -> list[str]:
+        try:
+            visitor = SQLVisitor(raw=raw)
+            visitor.visit(ast.parse(self.code))
+            return visitor.get_sqls()
+        except Exception:
+            return []
+
     @property
     def sqls(self) -> list[str]:
-        """Return a list of SQL statements for this cell."""
+        """Returns parsed SQL statements from this cell.
+
+        Returns:
+            list[str]: List of SQL statement strings parsed from the cell code.
+        """
         if self._sqls.parsed is not None:
             return self._sqls.parsed
 
-        try:
-            visitor = SQLVisitor()
-            visitor.visit(ast.parse(self.code))
-            sqls = visitor.get_sqls()
-            self._sqls.parsed = sqls
-        except Exception:
-            self._sqls.parsed = []
-
+        self._sqls.parsed = self._get_sqls()
         return self._sqls.parsed
+
+    @property
+    def raw_sqls(self) -> list[str]:
+        """Returns unparsed SQL statements from this cell.
+
+        Returns:
+            list[str]: List of SQL statements verbatim from the cell code.
+        """
+        if self._raw_sqls.parsed is not None:
+            return self._raw_sqls.parsed
+
+        self._raw_sqls.parsed = self._get_sqls(raw=True)
+        return self._raw_sqls.parsed
 
     @property
     def stale(self) -> bool:
@@ -241,7 +292,12 @@ class CellImpl:
     def set_runtime_state(
         self, status: RuntimeStateType, stream: Stream | None = None
     ) -> None:
-        """Set execution status and broadcast to frontends."""
+        """Sets the cell's execution status and broadcasts to frontends.
+
+        Args:
+            status (RuntimeStateType): New runtime state to set
+            stream (Stream | None, optional): Stream to broadcast on. Defaults to None.
+        """
         from marimo._messaging.ops import CellOp
         from marimo._runtime.context import (
             ContextNotInitializedError,
@@ -313,6 +369,9 @@ class Cell:
     # App to which this cell belongs
     _app: InternalApp | None = None
 
+    # Number of reserved arguments for pytest
+    _pytest_reserved: set[str] = dataclasses.field(default_factory=set)
+
     @property
     def name(self) -> str:
         return self._name
@@ -327,6 +386,7 @@ class Cell:
         """The definitions made by this cell"""
         return self._cell.defs
 
+    @property
     def _is_coroutine(self) -> bool:
         """Whether this cell is a coroutine function.
 
@@ -344,15 +404,15 @@ class Cell:
         from marimo._output.formatting import as_html
         from marimo._output.md import md
 
-        signature_prefix = "Async " if self._is_coroutine() else ""
+        signature_prefix = "Async " if self._is_coroutine else ""
         execute_str_refs = (
             f"output, defs = await {self.name}.run(**refs)"
-            if self._is_coroutine()
+            if self._is_coroutine
             else f"output, defs = {self.name}.run(**refs)"
         )
         execute_str_no_refs = (
             f"output, defs = await {self.name}.run()"
-            if self._is_coroutine()
+            if self._is_coroutine
             else f"output, defs = {self.name}.run()"
         )
 
@@ -389,121 +449,172 @@ class Cell:
         tuple[Any, Mapping[str, Any]]
         | Awaitable[tuple[Any, Mapping[str, Any]]]
     ):
-        """Run this cell and return its visual output and definitions
+        """
+        Run this cell and return its visual output and definitions.
 
         Use this method to run **named cells** and retrieve their output and
-        definitions.
-
-        This lets you use reuse cells defined in one notebook in another
+        definitions. This lets you reuse cells defined in one notebook in another
         notebook or Python file. It also makes it possible to write and execute
         unit tests for notebook cells using a test framework like `pytest`.
 
-        **Example.** marimo cells can be given names either through the
-        editor cell menu or by manually changing the function name in the
-        notebook file. For example, consider a notebook `notebook.py`:
+        Examples:
+            marimo cells can be given names either through the editor cell menu
+            or by manually changing the function name in the notebook file. For
+            example, consider a notebook `notebook.py`:
 
-        ```python
-        import marimo
+            ```python
+            import marimo
 
-        app = marimo.App()
-
-
-        @app.cell
-        def __():
-            import marimo as mo
-
-            return (mo,)
+            app = marimo.App()
 
 
-        @app.cell
-        def __():
-            x = 0
-            y = 1
-            return (x, y)
+            @app.cell
+            def __():
+                import marimo as mo
+
+                return (mo,)
 
 
-        @app.cell
-        def add(mo, x, y):
-            z = x + y
-            mo.md(f"The value of z is {z}")
-            return (z,)
+            @app.cell
+            def __():
+                x = 0
+                y = 1
+                return (x, y)
 
 
-        if __name__ == "__main__":
-            app.run()
-        ```
+            @app.cell
+            def add(mo, x, y):
+                z = x + y
+                mo.md(f"The value of z is {z}")
+                return (z,)
 
-        To reuse the `add` cell in another notebook, you'd simply write
 
-        ```python
-        from notebook import add
+            if __name__ == "__main__":
+                app.run()
+            ```
 
-        # `output` is the markdown rendered by `add`
-        # defs["z"] == `1`
-        output, defs = add.run()
-        ```
+            To reuse the `add` cell in another notebook, you'd simply write:
 
-        When `run` is called without arguments, it automatically computes the
-        values that the cell depends on (in this case, `mo`, `x`, and `y`). You
-        can override these values by providing any subset of them as keyword
-        arguments. For example,
+            ```python
+            from notebook import add
 
-        ```python
-        # defs["z"] == 4
-        output, defs = add.run(x=2, y=2)
-        ```
+            # `output` is the markdown rendered by `add`
+            # defs["z"] == `1`
+            output, defs = add.run()
+            ```
 
-        **Defined UI Elements.** If the cell's `output` has UI elements
-        that are in `defs`, interacting with the output in the frontend will
-        trigger reactive execution of cells that reference the `defs` object.
-        For example, if `output` has a slider defined by the cell, then
-        scrubbing the slider will cause cells that reference `defs` to run.
+            When `run` is called without arguments, it automatically computes
+            the values that the cell depends on (in this case, `mo`, `x`, and
+            `y`). You can override these values by providing any subset of them
+            as keyword arguments. For example,
 
-        **Async cells.** If this cell is a coroutine function (starting with
-        `async`), or if any of its ancestors are coroutine functions, then
-        you'll need to `await` the result: `output, defs = await cell.run()`.
-        You can check whether the result is an awaitable using:
+            ```python
+            # defs["z"] == 4
+            output, defs = add.run(x=2, y=2)
+            ```
 
-        ```python
-        from collections.abc import Awaitable
+        Defined UI Elements:
+            If the cell's `output` has UI elements that are in `defs`, interacting
+            with the output in the frontend will trigger reactive execution of
+            cells that reference the `defs` object. For example, if `output` has
+            a slider defined by the cell, then scrubbing the slider will cause
+            cells that reference `defs` to run.
 
-        ret = cell.run()
-        if isinstance(ret, Awaitable):
-            output, defs = await ret
-        else:
-            output, defs = ret
-        ```
+        Async cells:
+            If this cell is a coroutine function (starting with `async`), or if
+            any of its ancestors are coroutine functions, then you'll need to
+            `await` the result: `output, defs = await cell.run()`. You can check
+            whether the result is an awaitable using:
 
-        **Arguments**:
+            ```python
+            from collections.abc import Awaitable
 
-        - You may pass values for any of this cell's references as keyword
-          arguments. marimo will automatically compute values for any refs
-          that are not provided by executing the parent cells that compute
-          them.
+            ret = cell.run()
+            if isinstance(ret, Awaitable):
+                output, defs = await ret
+            else:
+                output, defs = ret
+            ```
 
-        **Returns**:
+        Args:
+            **refs (Any):
+                You may pass values for any of this cell's references as keyword
+                arguments. marimo will automatically compute values for any refs
+                that are not provided by executing the parent cells that compute
+                them.
 
-        - a tuple `(output, defs)`, or an awaitable of the same, where `output`
-          is the cell's last expression and `defs` is a `Mapping` from the
-          cell's defined names to their values.
+        Returns:
+            tuple `(output, defs)`, or an awaitable of the same:
+                `output` is the cell's last expression and `defs` is a `Mapping`
+                from the cell's defined names to their values.
         """
         assert self._app is not None
-        if self._is_coroutine():
-            return self._app.run_cell_async(cell=self, kwargs=refs)
-        else:
-            return self._app.run_cell_sync(cell=self, kwargs=refs)
 
-    def __call__(self, *args: Any, **kwargs: Any) -> None:
-        del args
-        del kwargs
-        if self._is_coroutine():
-            call_str = f"`outputs, defs = await {self.name}.run()`"
-        else:
-            call_str = f"`outputs, defs = {self.name}.run()`"
+        try:
+            if self._is_coroutine:
+                return self._app.run_cell_async(cell=self, kwargs=refs)
+            else:
+                return self._app.run_cell_sync(cell=self, kwargs=refs)
+        except MarimoRuntimeException as e:
+            raise e.__cause__ from None  # type: ignore
 
-        raise RuntimeError(
-            f"Calling marimo cells using `{self.name}()` is not supported. "
-            f"Use {call_str} instead. "
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        # TODO: Expand for top level modules when/ if the time comes.
+        arg_names = sorted(
+            self._cell.refs - set(globals()["__builtins__"].keys())
+        )
+        argc = len(arg_names)
+
+        call_args = {name: arg for name, arg in zip(arg_names, args)}
+        call_args.update(kwargs)
+        call_argc = len(call_args.keys()) + len(self._pytest_reserved)
+
+        is_pytest = "PYTEST_CURRENT_TEST" in os.environ
+        # Capture pytest case, where arguments don't match the references.
+        if self._pytest_reserved - set(arg_names):
+            raise TypeError(
+                "A mismatch in expected argument names likely means you should "
+                "resave the notebook in the marimo editor."
+            )
+
+        # If all the arguments are provided, then run as if it were a normal
+        # function call. An incorrect number of arguments will raise a
+        # TypeError (the same as a normal function call).
+        #
+        # pytest is an exception here, since it enables testing directly on
+        # notebooks, and the graph will be executed if needed.
+        if argc == call_argc and (
+            is_pytest or all(name in call_args for name in arg_names)
+        ):
+            # Note, run returns a tuple of (output, defs)-
+            # so stripped defs is required.
+            ret = self.run(**call_args)
+            if isinstance(ret, Awaitable):
+
+                async def await_and_return() -> Any:
+                    output, _ = await ret
+                    return output
+
+                return await_and_return()
+            else:
+                output, _ = ret
+            return output
+
+        if is_pytest:
+            call_str = (
+                "A mismatch in arguments likely means you should "
+                "resave the notebook in the marimo editor."
+            )
+        else:
+            await_str = "await " if self._is_coroutine else ""
+            call_str = (
+                "Consider calling with `outputs, defs = "
+                f"{await_str}{self.name}.run()`"
+            )
+
+        raise TypeError(
+            f"{self.name}() takes {argc} positional arguments but "
+            f"{call_argc} were given. {call_str}"
         )
 
 
@@ -512,7 +623,3 @@ class SourcePosition:
     filename: str
     lineno: int
     col_offset: int
-
-
-def is_ws(char: str) -> bool:
-    return char == " " or char == "\n" or char == "\t"

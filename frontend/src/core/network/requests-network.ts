@@ -1,4 +1,5 @@
 /* Copyright 2024 Marimo. All rights reserved. */
+import { reloadSafe } from "@/utils/reload-safe";
 import { API, marimoClient } from "./api";
 import type { RunRequests, EditRequests } from "./types";
 
@@ -35,6 +36,14 @@ export function createNetworkRequests(): EditRequests & RunRequests {
     sendSave: (request) => {
       return marimoClient
         .POST("/api/kernel/save", {
+          body: request,
+          parseAs: "text",
+        })
+        .then(handleResponseReturnNull);
+    },
+    sendCopy: (request) => {
+      return marimoClient
+        .POST("/api/kernel/copy", {
           body: request,
           parseAs: "text",
         })
@@ -159,7 +168,7 @@ export function createNetworkRequests(): EditRequests & RunRequests {
       await marimoClient
         .POST("/api/kernel/restart_session")
         .then(handleResponseReturnNull);
-      window.location.reload();
+      reloadSafe();
       return null;
     },
     getUsageStats: () => {
@@ -207,6 +216,13 @@ export function createNetworkRequests(): EditRequests & RunRequests {
         })
         .then(handleResponse);
     },
+    openTutorial: (request) => {
+      return marimoClient
+        .POST("/api/home/tutorial/open", {
+          body: request,
+        })
+        .then(handleResponse);
+    },
     getRecentFiles: () => {
       return marimoClient.POST("/api/home/recent_files").then(handleResponse);
     },
@@ -250,6 +266,44 @@ export function createNetworkRequests(): EditRequests & RunRequests {
           parseAs: "text",
         })
         .then(handleResponse);
+    },
+    autoExportAsHTML: async (request) => {
+      return marimoClient
+        .POST("/api/export/auto_export/html", {
+          body: request,
+        })
+        .then(handleResponseReturnNull);
+    },
+    autoExportAsMarkdown: async (request) => {
+      return marimoClient
+        .POST("/api/export/auto_export/markdown", {
+          body: request,
+        })
+        .then(handleResponseReturnNull);
+    },
+    autoExportAsIPYNB: async (request) => {
+      return marimoClient
+        .POST("/api/export/auto_export/ipynb", {
+          body: request,
+        })
+        .then(handleResponseReturnNull);
+    },
+    addPackage: (request) => {
+      return marimoClient
+        .POST("/api/packages/add", {
+          body: request,
+        })
+        .then(handleResponse);
+    },
+    removePackage: (request) => {
+      return marimoClient
+        .POST("/api/packages/remove", {
+          body: request,
+        })
+        .then(handleResponse);
+    },
+    getPackageList: () => {
+      return marimoClient.GET("/api/packages/list").then(handleResponse);
     },
   };
 }

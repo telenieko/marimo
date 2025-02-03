@@ -9,6 +9,7 @@ from marimo import _loggers
 from marimo._runtime.requests import SetUserConfigRequest
 from marimo._server.api.deps import AppState
 from marimo._server.api.utils import parse_request
+from marimo._server.ids import ConsumerId
 from marimo._server.models.models import (
     BaseResponse,
     SaveUserConfigurationRequest,
@@ -46,7 +47,10 @@ async def save_user_config(
                         $ref: "#/components/schemas/SuccessResponse"
     """  # noqa: E501
     app_state = AppState(request)
-    body = await parse_request(request, cls=SaveUserConfigurationRequest)
+    # Allow unknown keys to handle backward/forward compatibility
+    body = await parse_request(
+        request, cls=SaveUserConfigurationRequest, allow_unknown_keys=True
+    )
     config = app_state.config_manager.save_config(body.config)
 
     # Update the server's view of the config
@@ -58,5 +62,10 @@ async def save_user_config(
     # Session could be None if the user is on the home page
     session = app_state.get_current_session()
     if session is not None:
-        session.put_control_request(SetUserConfigRequest(body.config))
+        session.put_control_request(
+            SetUserConfigRequest(body.config),
+            from_consumer_id=ConsumerId(
+                app_state.require_current_session_id()
+            ),
+        )
     return SuccessResponse()

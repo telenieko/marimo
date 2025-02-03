@@ -1,6 +1,6 @@
 # Hotkeys
 
-If you'd like to override the default hotkeys, you can do so in the hotkeys menu (`Mod-Shift-h`), or modifying your `~/.marimo.toml`.
+If you'd like to override the default hotkeys, you can do so in the hotkeys menu (`Mod-Shift-h`), or modifying your `marimo.toml`.
 
 You can find a list of available hotkeys below:
 
@@ -20,8 +20,10 @@ You can find a list of available hotkeys below:
 | `cell.format`               |
 | `cell.goToDefinition`       |
 | `cell.hideCode`             |
-| `cell.moveDown`             |
 | `cell.moveUp`               |
+| `cell.moveDown`             |
+| `cell.moveLeft`             |
+| `cell.moveRight`            |
 | `cell.redo`                 |
 | `cell.run`                  |
 | `cell.runAndNewAbove`       |
@@ -34,6 +36,8 @@ You can find a list of available hotkeys below:
 | `cell.unfold`               |
 | `cell.unfoldAll`            |
 | `cell.viewAsMarkdown`       |
+| `completion.moveDown`        |
+| `completion.moveUp`          |
 | `global.commandPalette`     |
 | `global.focusBottom`        |
 | `global.focusTop`           |
@@ -45,6 +49,7 @@ You can find a list of available hotkeys below:
 | `global.save`               |
 | `global.showHelp`           |
 | `global.toggleLanguage`     |
+| `global.toggleTerminal`     |
 | `global.toggleSidebar`      |
 | `global.unfoldCode`         |
 | `markdown.blockquote`       |

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 from marimo import __version__
+from marimo._ast.app import _AppConfig
 from marimo._islands.island_generator import (
     MarimoIslandGenerator,
-    handle_mimetypes,
 )
-from marimo._messaging.cell_output import CellChannel, CellOutput
 from tests.mocks import snapshotter
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 snapshot = snapshotter(__file__)
 
@@ -39,6 +43,11 @@ async def test_render():
     generator = MarimoIslandGenerator()
     block1 = generator.add_code("import marimo as mo")
     block2 = generator.add_code("mo.md('Hello, islands!')")
+    imageBlock = generator.add_code(
+        "mo.image('https://example.com/image.png')"
+    )
+    jsonBlock = generator.add_code("{'key': 'value'}")
+    arrayBlock = generator.add_code("[1, mo.md('Hello')]")
 
     await generator.build()
 
@@ -55,31 +64,160 @@ async def test_render():
 
     snapshot("island-no-output.txt", block2.render(display_output=False))
 
-
-async def test_render_head():
-    generator = MarimoIslandGenerator()
-    generator.add_code("print('Hello, islands!')")
-    await generator.build()
-
-    # Check if render_head works after build() is called
     snapshot(
-        "header.txt", generator.render_head().replace(__version__, "0.0.0")
+        "island-mimetypes.txt",
+        "\n".join(
+            [
+                block2.render(display_code=False),
+                imageBlock.render(display_code=False),
+                jsonBlock.render(display_code=False),
+                arrayBlock.render(display_code=False),
+            ]
+        ),
     )
 
 
-async def test_handle_image_mimetype():
-    small_image = CellOutput(
-        data="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==",
-        mimetype="image/gif",
-        channel=CellChannel.OUTPUT,
+async def test_render_multiline_markdown():
+    generator = MarimoIslandGenerator()
+    stub = generator.add_code(
+        """
+        import marimo as mo
+        mo.md(
+            \"\"\"
+            # Hello, Markdown!
+
+            This is a paragsraph.
+
+            ```python3
+            mo.md(
+                '''
+                # Hello, Markdown!
+
+                This is a paragraph.
+                '''
+            )
+            ```
+            \"\"\"
+        )
+        """
     )
-    assert handle_mimetypes(small_image).startswith("<img")
+    await generator.build()
+    snapshot("markdown.txt", stub.render())
 
 
-async def test_handle_json_mimetype():
-    small_image = CellOutput(
-        data="[1, 2, 3]",
-        mimetype="application/json",
-        channel=CellChannel.OUTPUT,
+async def test_from_file(tmp_path: Path):
+    # Create a temporary marimo file
+    marimo_file = tmp_path / "temp_marimo_file.py"
+    marimo_file.write_text(
+        """
+import marimo
+
+app = marimo.App()
+
+@app.cell
+def __():
+    import marimo as mo
+    mo.md("# Hello, Marimo!")
+    return (mo,)
+
+@app.cell
+def __(mo):
+    x = 42
+    mo.md(f"The answer is {x}")
+    return (x,)
+        """
     )
-    assert handle_mimetypes(small_image).startswith("<marimo-json")
+
+    generator = MarimoIslandGenerator.from_file(str(marimo_file))
+
+    # Check if stubs were created correctly
+    assert len(generator._stubs) == 2
+    assert (
+        generator._stubs[0].code.strip()
+        == 'import marimo as mo\nmo.md("# Hello, Marimo!")'
+    )
+    assert (
+        generator._stubs[1].code.strip()
+        == 'x = 42\nmo.md(f"The answer is {x}")'
+    )
+
+    # Build and check outputs
+    await generator.build()
+    stub1 = generator._stubs[0]
+    stub2 = generator._stubs[1]
+    assert stub1.output is not None
+    assert stub2.output is not None
+    assert "Hello, Marimo!" in stub1.output.data
+    assert "The answer is 42" in stub2.output.data
+
+
+def test_render_head():
+    generator = MarimoIslandGenerator()
+    head_html = generator.render_head()
+
+    assert (
+        '<script type="module" src="https://cdn.jsdelivr.net/npm/@marimo-team/islands@'
+        in head_html
+    )
+    assert (
+        'href="https://cdn.jsdelivr.net/npm/@marimo-team/islands@' in head_html
+    )
+    assert (
+        '<link rel="preconnect" href="https://fonts.googleapis.com" />'
+        in head_html
+    )
+    assert 'href="https://cdn.jsdelivr.net/npm/katex@' in head_html
+
+    snapshot("header.txt", head_html.replace(__version__, "0.0.0"))
+
+
+def test_render_init_island():
+    generator = MarimoIslandGenerator()
+    init_island = generator.render_init_island()
+
+    assert "<marimo-island" in init_island
+    assert 'data-reactive="false"' in init_island
+    assert "Initializing..." in init_island
+
+
+def test_render_body():
+    generator = MarimoIslandGenerator()
+    generator.add_code("import marimo as mo")
+    generator.add_code("mo.md('Hello, World!')")
+
+    body_html = generator.render_body()
+
+    assert "<marimo-island" in body_html
+    assert 'data-reactive="true"' in body_html
+    assert "Hello%2C%20World!" in body_html
+    assert "Initializing..." in body_html  # Check for init island
+
+    # Test without init island
+    body_html_no_init = generator.render_body(include_init_island=False)
+    assert "Initializing..." not in body_html_no_init
+
+
+async def test_render_html():
+    generator = MarimoIslandGenerator()
+    generator.add_code("import marimo as mo")
+    generator.add_code("mo.md('Hello, HTML!')")
+
+    html = generator.render_html()
+
+    assert "<!doctype html>" in html
+    assert '<html lang="en">' in html
+    assert "<head>" in html
+    assert "<body>" in html
+    assert "Hello%2C%20HTML!" in html
+    snapshot("html.txt", html.replace(__version__, "0.0.0"))
+
+
+def test_app_config():
+    generator = MarimoIslandGenerator()
+    generator._config = _AppConfig(width="medium", app_title="Test App")
+
+    body_html = generator.render_body()
+    assert 'style="margin: auto; max-width: 1110px;"' in body_html
+
+    html = generator.render_html()
+    assert "<title> Test App </title>" in html

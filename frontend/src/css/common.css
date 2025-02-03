@@ -5,6 +5,12 @@
   .hover-action {
     display: none !important;
   }
+
+  [data-is-dragging="true"] {
+    .hover-actions-parent.hover-actions-parent .hover-action:not(:hover) {
+      display: none !important;
+    }
+  }
 }
 
 .hover-action:hover,
@@ -18,7 +24,11 @@
 }
 
 /* If parent has any children that have an open pop, show hover actions */
-.hover-actions-parent:has([data-state="open"])
-  .hover-action {
+.hover-actions-parent:has([data-state="open"]) .hover-action {
   display: inline-flex !important;
+}
+
+/* When any element is fullscreen, hide the element with this class */
+:root:has(:fullscreen) .hide-on-fullscreen {
+  display: none !important;
 }

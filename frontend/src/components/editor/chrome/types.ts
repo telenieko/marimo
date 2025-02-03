@@ -12,6 +12,9 @@ import {
   SquareDashedBottomCodeIcon,
   DatabaseIcon,
   NotebookPenIcon,
+  BoxIcon,
+  BotMessageSquareIcon,
+  ActivityIcon,
 } from "lucide-react";
 
 export type PanelType =
@@ -20,10 +23,13 @@ export type PanelType =
   | "variables"
   | "outline"
   | "dependencies"
+  | "tracing"
+  | "packages"
   | "documentation"
   | "snippets"
   | "datasources"
   | "scratchpad"
+  | "chat"
   | "logs";
 
 export interface PanelDescriptor {
@@ -60,10 +66,23 @@ export const PANELS: PanelDescriptor[] = [
     position: "sidebar",
   },
   {
+    type: "packages",
+    Icon: BoxIcon,
+    tooltip: "Manage packages",
+    position: "sidebar",
+  },
+  {
     type: "outline",
     Icon: ScrollTextIcon,
     tooltip: "View outline",
     position: "sidebar",
+  },
+  {
+    type: "chat",
+    Icon: BotMessageSquareIcon,
+    tooltip: "Chat with AI",
+    position: "sidebar",
+    hidden: !getFeatureFlag("chat_sidebar"),
   },
   {
     type: "documentation",
@@ -75,6 +94,12 @@ export const PANELS: PanelDescriptor[] = [
     type: "logs",
     Icon: FileTextIcon,
     tooltip: "Notebook logs",
+    position: "sidebar",
+  },
+  {
+    type: "tracing",
+    Icon: ActivityIcon,
+    tooltip: "Tracing",
     position: "sidebar",
   },
   {

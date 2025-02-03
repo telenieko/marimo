@@ -1,8 +1,14 @@
 # Copyright 2024 Marimo. All rights reserved.
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Optional, Sequence, cast
+import datetime
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, cast
 
+from marimo._plugins.ui._impl.dataframes.transforms.print_code import (
+    python_print_pandas,
+    python_print_polars,
+    python_print_transforms,
+)
 from marimo._plugins.ui._impl.dataframes.transforms.types import (
     AggregateTransform,
     ColumnConversionTransform,
@@ -15,20 +21,19 @@ from marimo._plugins.ui._impl.dataframes.transforms.types import (
     SelectColumnsTransform,
     ShuffleRowsTransform,
     SortColumnTransform,
+    Transform,
     TransformHandler,
 )
 from marimo._utils.assert_never import assert_never
 
 if TYPE_CHECKING:
+    import ibis  # type: ignore
+    import ibis.expr.types as ir  # type: ignore
     import pandas as pd
     import polars as pl
 
 
 class PandasTransformHandler(TransformHandler["pd.DataFrame"]):
-    @staticmethod
-    def supports_code_sample() -> bool:
-        return True
-
     @staticmethod
     def handle_column_conversion(
         df: "pd.DataFrame", transform: ColumnConversionTransform
@@ -61,57 +66,78 @@ class PandasTransformHandler(TransformHandler["pd.DataFrame"]):
     def handle_filter_rows(
         df: "pd.DataFrame", transform: FilterRowsTransform
     ) -> "pd.DataFrame":
+        if not transform.where:
+            return df
+
+        import pandas as pd
+
+        clauses: List[pd.Series[Any]] = []
         for condition in transform.where:
-            value = _coerce_value(
-                df[condition.column_id].dtype, condition.value
-            )
+            column: pd.Series[Any] = df[condition.column_id]
+
+            try:
+                value = _coerce_value(
+                    df[condition.column_id].dtype, condition.value
+                )
+            except Exception:
+                value = condition.value or ""
+
+            # Handle numeric comparisons
             if condition.operator == "==":
-                df_filter = df[condition.column_id] == value
+                df_filter = column == value
             elif condition.operator == "!=":
-                df_filter = df[condition.column_id] != value
+                df_filter = column != value
             elif condition.operator == ">":
-                df_filter = df[condition.column_id] > value
+                df_filter = column > value
             elif condition.operator == "<":
-                df_filter = df[condition.column_id] < value
+                df_filter = column < value
             elif condition.operator == ">=":
-                df_filter = df[condition.column_id] >= value
+                df_filter = column >= value
             elif condition.operator == "<=":
-                df_filter = df[condition.column_id] <= value
+                df_filter = column <= value
+            # Handle boolean operations
             elif condition.operator == "is_true":
-                df_filter = df[condition.column_id].eq(True)
+                df_filter = column.eq(True)
             elif condition.operator == "is_false":
-                df_filter = df[condition.column_id].eq(False)
+                df_filter = column.eq(False)
+            # Handle null checks
             elif condition.operator == "is_nan":
-                df_filter = df[condition.column_id].isna()
+                df_filter = column.isna()
             elif condition.operator == "is_not_nan":
-                df_filter = df[condition.column_id].notna()
+                df_filter = column.notna()
+            # Handle equality operations
             elif condition.operator == "equals":
-                df_filter = df[condition.column_id].eq(value)
+                df_filter = column == value
             elif condition.operator == "does_not_equal":
-                df_filter = df[condition.column_id].ne(value)
+                df_filter = column != value
+            # Handle string operations
             elif condition.operator == "contains":
-                df_filter = df[condition.column_id].str.contains(
-                    value, regex=False
+                df_filter = column.str.contains(
+                    str(value), regex=False, na=False
                 )
             elif condition.operator == "regex":
-                df_filter = df[condition.column_id].str.contains(
-                    value, regex=True
+                df_filter = column.str.contains(
+                    str(value), regex=True, na=False
                 )
             elif condition.operator == "starts_with":
-                df_filter = df[condition.column_id].str.startswith(value)
+                df_filter = column.str.startswith(str(value), na=False)
             elif condition.operator == "ends_with":
-                df_filter = df[condition.column_id].str.endswith(value)
+                df_filter = column.str.endswith(str(value), na=False)
+            # Handle list operations with proper Unicode handling
             elif condition.operator == "in":
                 df_filter = df[condition.column_id].isin(value)
             else:
                 assert_never(condition.operator)
 
-            if transform.operation == "keep_rows":
-                df = df[df_filter]
-            elif transform.operation == "remove_rows":
-                df = df[~df_filter]
-            else:
-                assert_never(transform.operation)
+            clauses.append(df_filter)
+
+        if transform.operation == "keep_rows":
+            df = df[pd.concat(clauses, axis=1).all(axis=1)]
+        elif transform.operation == "remove_rows":
+            df = df[~pd.concat(clauses, axis=1).all(axis=1)]
+        else:
+            assert_never(transform.operation)
+
         return df
 
     @staticmethod
@@ -187,27 +213,27 @@ class PandasTransformHandler(TransformHandler["pd.DataFrame"]):
             pd.DataFrame(df.pop(cast(str, column_id)).values.tolist())
         )
 
+    @staticmethod
+    def as_python_code(
+        df_name: str, columns: List[str], transforms: List[Transform]
+    ) -> str:
+        return python_print_transforms(
+            df_name, columns, transforms, python_print_pandas
+        )
+
 
 class PolarsTransformHandler(TransformHandler["pl.DataFrame"]):
-    @staticmethod
-    def supports_code_sample() -> bool:
-        return False
-
     @staticmethod
     def handle_column_conversion(
         df: "pl.DataFrame", transform: ColumnConversionTransform
     ) -> "pl.DataFrame":
         import polars.datatypes as pl_datatypes
 
-        def numpy_type_to_polars_type(dtype: str) -> pl.PolarsDataType:
-            polars_dtype = pl_datatypes.numpy_char_code_to_dtype(dtype)
-            return polars_dtype
-
         return df.cast(
             {
-                str(transform.column_id): numpy_type_to_polars_type(
-                    transform.data_type
-                )
+                str(
+                    transform.column_id
+                ): pl_datatypes.numpy_char_code_to_dtype(transform.data_type)
             },
             strict=transform.errors == "raise",
         )
@@ -234,6 +260,7 @@ class PolarsTransformHandler(TransformHandler["pl.DataFrame"]):
     def handle_filter_rows(
         df: "pl.DataFrame", transform: FilterRowsTransform
     ) -> "pl.DataFrame":
+        import polars as pl
         from polars import col
 
         # Start with no filter (all rows included)
@@ -242,7 +269,16 @@ class PolarsTransformHandler(TransformHandler["pl.DataFrame"]):
         # Iterate over all conditions and build the filter expression
         for condition in transform.where:
             column = col(str(condition.column_id))
+            dtype = df.schema[str(condition.column_id)]
             value = condition.value
+
+            # If columns type is a Datetime, we need to convert the value to a datetime
+            if dtype == pl.Datetime and isinstance(value, str):
+                value = datetime.datetime.fromisoformat(value)
+            elif dtype == pl.Date and isinstance(value, str):
+                value = datetime.date.fromisoformat(value)
+            elif dtype == pl.Time and isinstance(value, str):
+                value = datetime.time.fromisoformat(value)
 
             # Build the expression based on the operator
             if condition.operator == "==":
@@ -408,8 +444,234 @@ class PolarsTransformHandler(TransformHandler["pl.DataFrame"]):
         df = df.drop(cast(str, column_id))
         return df.hstack(pl.DataFrame(column.to_list()))
 
+    @staticmethod
+    def as_python_code(
+        df_name: str, columns: List[str], transforms: List[Transform]
+    ) -> str:
+        return python_print_transforms(
+            df_name, columns, transforms, python_print_polars
+        )
+
+
+class IbisTransformHandler(TransformHandler["ibis.Table"]):
+    @staticmethod
+    def handle_column_conversion(
+        df: "ibis.Table", transform: ColumnConversionTransform
+    ) -> "ibis.Table":
+        import ibis
+
+        if transform.errors == "ignore":
+            try:
+                # Use coalesce to handle conversion errors
+                return df.mutate(
+                    ibis.coalesce(
+                        df[transform.column_id].cast(
+                            ibis.dtype(transform.data_type)
+                        ),
+                        df[transform.column_id],
+                    ).name(transform.column_id)
+                )
+            except ibis.common.exceptions.IbisTypeError:
+                return df
+        else:
+            # Default behavior (raise errors)
+            return df.mutate(
+                df[transform.column_id]
+                .cast(ibis.dtype(transform.data_type))
+                .name(transform.column_id)
+            )
+
+    @staticmethod
+    def handle_rename_column(
+        df: "ibis.Table", transform: RenameColumnTransform
+    ) -> "ibis.Table":
+        return df.rename({transform.new_column_id: transform.column_id})
+
+    @staticmethod
+    def handle_sort_column(
+        df: "ibis.Table", transform: SortColumnTransform
+    ) -> "ibis.Table":
+        return df.order_by(
+            [
+                (
+                    df[transform.column_id].asc()
+                    if transform.ascending
+                    else df[transform.column_id].desc()
+                )
+            ]
+        )
+
+    @staticmethod
+    def handle_filter_rows(
+        df: "ibis.Table", transform: FilterRowsTransform
+    ) -> "ibis.Table":
+        import ibis
+
+        filter_conditions: list[ir.BooleanValue] = []
+        for condition in transform.where:
+            column = df[str(condition.column_id)]
+            value = condition.value
+            if condition.operator == "==":
+                filter_conditions.append(column == value)
+            elif condition.operator == "!=":
+                filter_conditions.append(column != value)
+            elif condition.operator == ">":
+                filter_conditions.append(column > value)
+            elif condition.operator == "<":
+                filter_conditions.append(column < value)
+            elif condition.operator == ">=":
+                filter_conditions.append(column >= value)
+            elif condition.operator == "<=":
+                filter_conditions.append(column <= value)
+            elif condition.operator == "is_true":
+                filter_conditions.append(column)
+            elif condition.operator == "is_false":
+                filter_conditions.append(~column)
+            elif condition.operator == "is_nan":
+                filter_conditions.append(column.isnull())
+            elif condition.operator == "is_not_nan":
+                filter_conditions.append(column.notnull())
+            elif condition.operator == "equals":
+                filter_conditions.append(column == value)
+            elif condition.operator == "does_not_equal":
+                filter_conditions.append(column != value)
+            elif condition.operator == "contains":
+                filter_conditions.append(column.contains(value))
+            elif condition.operator == "regex":
+                filter_conditions.append(column.re_search(value))
+            elif condition.operator == "starts_with":
+                filter_conditions.append(column.startswith(value))
+            elif condition.operator == "ends_with":
+                filter_conditions.append(column.endswith(value))
+            elif condition.operator == "in":
+                filter_conditions.append(column.isin(value))
+            else:
+                assert_never(condition.operator)
+
+        combined_condition = ibis.and_(*filter_conditions)
+
+        if transform.operation == "keep_rows":
+            return df.filter(combined_condition)
+        elif transform.operation == "remove_rows":
+            return df.filter(~combined_condition)
+        else:
+            assert_never(transform.operation)
+
+    @staticmethod
+    def handle_group_by(
+        df: "ibis.Table", transform: GroupByTransform
+    ) -> "ibis.Table":
+        aggs: list[ir.Expr] = []
+
+        group_by_column_id_set = set(transform.column_ids)
+        agg_columns = [
+            column_id
+            for column_id in df.columns
+            if column_id not in group_by_column_id_set
+        ]
+        for column_id in agg_columns:
+            agg_func = transform.aggregation
+            if agg_func == "count":
+                aggs.append(df[column_id].count().name(f"{column_id}_count"))
+            elif agg_func == "sum":
+                aggs.append(df[column_id].sum().name(f"{column_id}_sum"))
+            elif agg_func == "mean":
+                aggs.append(df[column_id].mean().name(f"{column_id}_mean"))
+            elif agg_func == "median":
+                aggs.append(df[column_id].median().name(f"{column_id}_median"))
+            elif agg_func == "min":
+                aggs.append(df[column_id].min().name(f"{column_id}_min"))
+            elif agg_func == "max":
+                aggs.append(df[column_id].max().name(f"{column_id}_max"))
+            else:
+                assert_never(agg_func)
+
+        return df.group_by(transform.column_ids).aggregate(aggs)
+
+    @staticmethod
+    def handle_aggregate(
+        df: "ibis.Table", transform: AggregateTransform
+    ) -> "ibis.Table":
+        agg_dict: Dict[str, Any] = {}
+        for agg_func in transform.aggregations:
+            for column_id in transform.column_ids:
+                name = f"{column_id}_{agg_func}"
+                agg_dict[name] = getattr(df[column_id], agg_func)()
+        return df.aggregate(**agg_dict)
+
+    @staticmethod
+    def handle_select_columns(
+        df: "ibis.Table", transform: SelectColumnsTransform
+    ) -> "ibis.Table":
+        return df.select(transform.column_ids)
+
+    @staticmethod
+    def handle_shuffle_rows(
+        df: "ibis.Table", transform: ShuffleRowsTransform
+    ) -> "ibis.Table":
+        del transform
+        import ibis
+
+        return df.order_by(ibis.random())
+
+    @staticmethod
+    def handle_sample_rows(
+        df: "ibis.Table", transform: SampleRowsTransform
+    ) -> "ibis.Table":
+        return df.sample(
+            transform.n / df.count().execute(),
+            method="row",
+            seed=transform.seed,
+        )
+
+    @staticmethod
+    def handle_explode_columns(
+        df: "ibis.Table", transform: ExplodeColumnsTransform
+    ) -> "ibis.Table":
+        for column_id in transform.column_ids:
+            df = df.unnest(column_id)
+        return df
+
+    @staticmethod
+    def handle_expand_dict(
+        df: "ibis.Table", transform: ExpandDictTransform
+    ) -> "ibis.Table":
+        return df.unpack(transform.column_id)
+
+    # TODO: support as_python_code for Ibis
+    # @staticmethod
+    # def as_python_code(
+    #     df_name: str, columns: List[str], transforms: List[Transform]
+    # ) -> str | None:
+    #     return python_print_transforms(
+    #         df_name, columns, transforms, python_print_ibis
+    #     )
+
+    @staticmethod
+    def as_sql_code(transformed_df: "ibis.Table") -> str | None:
+        import ibis
+
+        try:
+            return str(ibis.to_sql(transformed_df))
+        except Exception:
+            # In case it is not a SQL backend
+            return None
+
 
 def _coerce_value(dtype: Any, value: Any) -> Any:
+    """Coerce value to match column dtype while preserving numeric precision."""
     import numpy as np
 
-    return np.array([value]).astype(dtype)[0]
+    # Handle None/empty values
+    if value is None:
+        return None
+
+    # If its a int or float, return as is
+    if isinstance(value, (int, float)):
+        return value
+
+    # Default coercion for other cases
+    try:
+        return np.array([value]).astype(dtype)[0]
+    except Exception:
+        return value

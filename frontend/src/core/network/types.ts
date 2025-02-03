@@ -17,12 +17,12 @@ export type CellConfig = schemas["CellConfig"];
  */
 export type RuntimeState = schemas["RuntimeState"];
 export type CodeCompletionRequest = schemas["CodeCompletionRequest"];
-export type CreationRequest = schemas["CreationRequest"];
 export type DeleteCellRequest = schemas["DeleteCellRequest"];
 export type ExecuteMultipleRequest = schemas["ExecuteMultipleRequest"];
 export type ExecutionRequest = schemas["ExecutionRequest"];
 export type ExportAsHTMLRequest = schemas["ExportAsHTMLRequest"];
 export type ExportAsMarkdownRequest = schemas["ExportAsMarkdownRequest"];
+export type ExportAsIPYNBRequest = schemas["ExportAsIPYNBRequest"];
 export type ExportAsScriptRequest = schemas["ExportAsScriptRequest"];
 export type FileCreateRequest = schemas["FileCreateRequest"];
 export type FileCreateResponse = schemas["FileCreateResponse"];
@@ -42,6 +42,10 @@ export type FormatResponse = schemas["FormatResponse"];
 export type FunctionCallRequest = schemas["FunctionCallRequest"];
 export type InstallMissingPackagesRequest =
   schemas["InstallMissingPackagesRequest"];
+export type AddPackageRequest = schemas["AddPackageRequest"];
+export type RemovePackageRequest = schemas["RemovePackageRequest"];
+export type ListPackagesResponse = schemas["ListPackagesResponse"];
+export type PackageOperationResponse = schemas["PackageOperationResponse"];
 export type InstantiateRequest = schemas["InstantiateRequest"];
 export type MarimoConfig = schemas["MarimoConfig"];
 export type MarimoFile = schemas["MarimoFile"];
@@ -56,6 +60,7 @@ export type RunScratchpadRequest = schemas["RunScratchpadRequest"];
 export type SaveAppConfigurationRequest =
   schemas["SaveAppConfigurationRequest"];
 export type SaveNotebookRequest = schemas["SaveNotebookRequest"];
+export type CopyNotebookRequest = schemas["CopyNotebookRequest"];
 export type SaveUserConfigurationRequest =
   schemas["SaveUserConfigurationRequest"];
 export interface SetCellConfigRequest {
@@ -77,6 +82,8 @@ export type UsageResponse =
 export type WorkspaceFilesRequest = schemas["WorkspaceFilesRequest"];
 export type WorkspaceFilesResponse = schemas["WorkspaceFilesResponse"];
 export type RunningNotebooksResponse = schemas["RunningNotebooksResponse"];
+export type OpenTutorialRequest = schemas["OpenTutorialRequest"];
+export type TutorialId = OpenTutorialRequest["tutorialId"];
 
 /**
  * Requests sent to the BE during run/edit mode.
@@ -93,6 +100,7 @@ export interface RunRequests {
 export interface EditRequests {
   sendRename: (request: RenameFileRequest) => Promise<null>;
   sendSave: (request: SaveNotebookRequest) => Promise<null>;
+  sendCopy: (request: CopyNotebookRequest) => Promise<null>;
   sendStdin: (request: StdinRequest) => Promise<null>;
   sendRun: (request: RunRequest) => Promise<null>;
   sendRunScratchpad: (request: RunScratchpadRequest) => Promise<null>;
@@ -128,6 +136,7 @@ export interface EditRequests {
   sendUpdateFile: (request: FileUpdateRequest) => Promise<FileUpdateResponse>;
   sendFileDetails: (request: { path: string }) => Promise<FileDetailsResponse>;
   // Homepage requests
+  openTutorial: (request: OpenTutorialRequest) => Promise<MarimoFile>;
   getRecentFiles: () => Promise<RecentFilesResponse>;
   getWorkspaceFiles: (
     request: WorkspaceFilesRequest,
@@ -136,8 +145,18 @@ export interface EditRequests {
   shutdownSession: (
     request: ShutdownSessionRequest,
   ) => Promise<RunningNotebooksResponse>;
+  // Export requests
   exportAsHTML: (request: ExportAsHTMLRequest) => Promise<string>;
   exportAsMarkdown: (request: ExportAsMarkdownRequest) => Promise<string>;
+  autoExportAsHTML: (request: ExportAsHTMLRequest) => Promise<null>;
+  autoExportAsMarkdown: (request: ExportAsMarkdownRequest) => Promise<null>;
+  autoExportAsIPYNB: (request: ExportAsIPYNBRequest) => Promise<null>;
+  // Package requests
+  getPackageList: () => Promise<ListPackagesResponse>;
+  addPackage: (request: AddPackageRequest) => Promise<PackageOperationResponse>;
+  removePackage: (
+    request: RemovePackageRequest,
+  ) => Promise<PackageOperationResponse>;
 }
 
 export type RequestKey = keyof (EditRequests & RunRequests);

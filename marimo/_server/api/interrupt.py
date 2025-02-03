@@ -5,8 +5,10 @@ import asyncio
 import signal
 from typing import Callable
 
+from marimo._config.settings import GLOBAL_SETTINGS
 from marimo._server.utils import (
     TAB,
+    print_,
 )
 
 
@@ -53,6 +55,10 @@ class InterruptHandler:
             self.shutdown()
 
         try:
+            if GLOBAL_SETTINGS.YES:
+                self.shutdown()
+                return
+
             response = input(
                 f"\r{TAB}\033[1;32mAre you sure you want to quit?\033[0m "
                 "\033[1m(y/n)\033[0m: "
@@ -61,7 +67,7 @@ class InterruptHandler:
                 self.shutdown()
                 return
         except (KeyboardInterrupt, EOFError, asyncio.CancelledError):
-            print()
+            print_()
             self.shutdown()
             return
 

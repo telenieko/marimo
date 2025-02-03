@@ -2,7 +2,7 @@
 
 import marimo
 
-__generated_with = "0.7.17"
+__generated_with = "0.9.30"
 app = marimo.App()
 
 
@@ -37,12 +37,15 @@ def __(mo):
 def __(mo):
     mo.md(
         """
-        **Tip: toggling between Markdown and Python views**
+        **Tip: toggling between the Markdown and Python editor**
 
-        Although markdown is written with `mo.md`, marimo provides a markdown view
-        that hides this boilerplate from you. You can toggle between Markdown and
-        Python views by clicking the button in the top-right of this cell or
-        entering `Ctrl/Cmd+Shift+M`.
+        Although markdown is written with `mo.md`, marimo provides a markdown editor
+        that hides this boilerplate from you.
+
+        Toggle between the Markdown and Python
+        editors by clicking the blue icon in the top-right of the editor,
+        entering `Ctrl/Cmd+Shift+M`, or using the "cell actions menu". You can
+        also **hide** the markdown editor through the cell actions menu.
 
         **Tip**: To interpolate Python values into markdown strings, you'll
         need to use `mo.md(f"...")` directly; the markdown view does not support
@@ -102,6 +105,23 @@ def __(mo):
 
 @app.cell(hide_code=True)
 def __(mo):
+    mo.accordion(
+        {
+            "Note: KaTeX": mo.md(
+                """
+                marimo actually uses KaTeX, a math typesetting library for the
+                web which supports a subset of LaTeX. For a list of
+                (un)supported commands, visit
+                https://katex.org/docs/support_table
+                """
+            )
+        }
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def __(mo):
     mo.md(
         """
         ## Interpolating Python values
@@ -134,7 +154,6 @@ def __(
         _x = np.linspace(start=0, stop=2 * np.pi)
         plt.plot(_x, np.sin(_x))
         return plt.gca()
-
 
     mo.md(
         f"""
@@ -174,7 +193,7 @@ def __(mo):
         {leaves}
         """
     )
-    return leaves,
+    return (leaves,)
 
 
 @app.cell
@@ -211,7 +230,6 @@ def __(missing_numpy_msg, mo, np, numpy_installed):
         y = np.sin(x)
         return pd.DataFrame({"x": x, "sin(x)": y})
 
-
     mo.md(
         f"""
         ### Other objects
@@ -230,7 +248,7 @@ def __(missing_numpy_msg, mo, np, numpy_installed):
         {mo.as_html(make_dataframe())}
         """
     )
-    return make_dataframe,
+    return (make_dataframe,)
 
 
 @app.cell(hide_code=True)
@@ -279,14 +297,12 @@ def __(
     matplotlib_installed,
     missing_matplotlib_msg,
     missing_numpy_msg,
+    mo,
     np,
     numpy_installed,
     plt,
 ):
-    import functools
-
-
-    @functools.cache
+    @mo.cache
     def plotsin(amplitude, period):
         if not numpy_installed:
             return missing_numpy_msg
@@ -296,7 +312,8 @@ def __(
         plt.plot(x, amplitude * np.sin(2 * np.pi / period * x))
         plt.ylim(-2.2, 2.2)
         return plt.gca()
-    return functools, plotsin
+
+    return (plotsin,)
 
 
 @app.cell
@@ -333,7 +350,9 @@ def __(amplitude, mo, period, plotsin):
 def __(mo):
     matplotlib_installed = False
     numpy_installed = False
-    missing_numpy_msg = mo.md("Oops! Looks like you don't have `numpy` installed.")
+    missing_numpy_msg = mo.md(
+        "Oops! Looks like you don't have `numpy` installed."
+    )
     missing_matplotlib_msg = mo.md(
         "Oops! Looks like you don't have `matplotlib` installed."
     )
@@ -366,6 +385,7 @@ def __():
     import math
 
     import marimo as mo
+
     return math, mo
 
 

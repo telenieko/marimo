@@ -4,7 +4,7 @@ import { getAppUrl } from "../playwright.config";
 import { takeScreenshot } from "./helper";
 import { fileURLToPath } from "node:url";
 
-const __filename = fileURLToPath(import.meta.url);
+const _filename = fileURLToPath(import.meta.url);
 
 const runUrl = getAppUrl("layout_grid.py//run");
 const runMaxWidthUrl = getAppUrl("layout_grid_max_width.py//run");
@@ -20,6 +20,8 @@ test("can run Grid layout", async ({ page }) => {
 
   // Type in search box
   await page.getByRole("textbox").last().fill("hello");
+  // Blur
+  await page.getByRole("textbox").last().blur();
 
   // Verify dependent output updated
   await expect(page.getByText("Searching hello")).toBeVisible();
@@ -30,7 +32,7 @@ test("can run Grid layout", async ({ page }) => {
   expect(bb1.y).toBe(bb2.y);
   expect(bb1.x).toBeGreaterThan(bb2.x);
 
-  await takeScreenshot(page, __filename);
+  await takeScreenshot(page, _filename);
 });
 
 test("can run Grid layout with max-width", async ({ page }) => {
@@ -41,7 +43,7 @@ test("can run Grid layout with max-width", async ({ page }) => {
   // Verify markdown "Grid Layout"
   await expect(page.getByText("Grid Layout")).toBeVisible();
 
-  await takeScreenshot(page, __filename);
+  await takeScreenshot(page, _filename);
 });
 
 test("can edit Grid layout", async ({ page }) => {
@@ -65,6 +67,7 @@ test("can edit Grid layout", async ({ page }) => {
 
   // Can still use interactive elements
   await page.getByRole("textbox").last().fill("hello");
+  await page.getByRole("textbox").last().blur();
   await expect(page.getByText("Searching hello")).toBeVisible();
 
   // Can toggle to Vertical layout
@@ -81,7 +84,7 @@ test("can edit Grid layout", async ({ page }) => {
   expect(bb1.x).toBe(bb2.x);
   expect(bb1.y).toBeLessThan(bb2.y);
 
-  await takeScreenshot(page, __filename);
+  await takeScreenshot(page, _filename);
 });
 
 interface BoundingBox {

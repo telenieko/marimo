@@ -165,6 +165,144 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/export/auto_export/html": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: {
+        content: {
+          "application/json": components["schemas"]["ExportAsHTMLRequest"];
+        };
+      };
+      responses: {
+        /** @description Export the notebook as HTML */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/json": components["schemas"]["SuccessResponse"];
+          };
+        };
+        /** @description File must be saved before downloading */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content?: never;
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/export/auto_export/ipynb": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: {
+        content: {
+          "application/json": components["schemas"]["ExportAsIPYNBRequest"];
+        };
+      };
+      responses: {
+        /** @description Export the notebook as IPYNB */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/json": components["schemas"]["SuccessResponse"];
+          };
+        };
+        /** @description File must be saved before downloading */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content?: never;
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/export/auto_export/markdown": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: {
+        content: {
+          "application/json": components["schemas"]["ExportAsMarkdownRequest"];
+        };
+      };
+      responses: {
+        /** @description Export the notebook as a markdown */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/json": components["schemas"]["SuccessResponse"];
+          };
+        };
+        /** @description File must be saved before downloading */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content?: never;
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/export/html": {
     parameters: {
       query?: never;
@@ -646,6 +784,45 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/home/tutorial/open": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: {
+        content: {
+          "application/json": components["schemas"]["OpenTutorialRequest"];
+        };
+      };
+      responses: {
+        /** @description Open a new tutorial */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/json": components["schemas"]["MarimoFile"];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/home/workspace_files": {
     parameters: {
       query?: never;
@@ -714,6 +891,45 @@ export interface paths {
           };
           content: {
             "application/json": components["schemas"]["SuccessResponse"];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/kernel/copy": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: {
+        content: {
+          "application/json": components["schemas"]["CopyNotebookRequest"];
+        };
+      };
+      responses: {
+        /** @description Copy notebook */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "text/plain": string;
           };
         };
       };
@@ -1502,6 +1718,144 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/kernel/takeover": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: never;
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/packages/add": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: {
+        content: {
+          "application/json": components["schemas"]["AddPackageRequest"];
+        };
+      };
+      responses: {
+        /** @description Install package */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/json": components["schemas"]["PackageOperationResponse"];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/packages/list": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description List installed packages */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/json": components["schemas"]["ListPackagesResponse"];
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/packages/remove": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: {
+        content: {
+          "application/json": components["schemas"]["RemovePackageRequest"];
+        };
+      };
+      responses: {
+        /** @description Uninstall package */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/json": components["schemas"]["PackageOperationResponse"];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/status": {
     parameters: {
       query?: never;
@@ -1533,6 +1887,43 @@ export interface paths {
               sessions?: number;
               status?: string;
               version?: string;
+            };
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/status/connections": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Get the number of active websocket connections */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            "application/json": {
+              active?: number;
             };
           };
         };
@@ -1688,8 +2079,21 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
+    AddPackageRequest: {
+      package: string;
+    };
     AiCompletionRequest: {
       code: string;
+      context?: {
+        schema: {
+          columns: {
+            name: string;
+            sampleValues: unknown[];
+            type: string;
+          }[];
+          name: string;
+        }[];
+      } | null;
       includeOtherCode: string;
       /** @enum {string} */
       language: "python" | "markdown" | "sql";
@@ -1739,6 +2143,7 @@ export interface components {
       | "marimo-error"
       | "media";
     CellConfig: {
+      column?: number | null;
       disabled: boolean;
       hide_code: boolean;
     };
@@ -1753,6 +2158,7 @@ export interface components {
       /** @enum {string} */
       name: "cell-op";
       output?: components["schemas"]["CellOutput"];
+      run_id?: string | null;
       stale_inputs?: boolean | null;
       status?: components["schemas"]["RuntimeState"];
       timestamp: number;
@@ -1804,9 +2210,9 @@ export interface components {
       }[];
       prefix_length: number;
     };
-    CreationRequest: {
-      executionRequests: components["schemas"]["ExecutionRequest"][];
-      setUiElementValueRequest: components["schemas"]["SetUIElementValueRequest"];
+    CopyNotebookRequest: {
+      destination: string;
+      source: string;
     };
     CycleError: {
       edges_with_vars: [string, string[], string][];
@@ -1824,6 +2230,17 @@ export interface components {
       summary?: components["schemas"]["ColumnSummary"];
       table_name: string;
     };
+    DataSourceConnection: {
+      dialect: string;
+      display_name: string;
+      name: string;
+      source: string;
+    };
+    DataSourceConnections: {
+      connections: components["schemas"]["DataSourceConnection"][];
+      /** @enum {string} */
+      name: "data-source-connections";
+    };
     DataTable: {
       columns: components["schemas"]["DataTableColumn"][];
       name: string;
@@ -1831,19 +2248,28 @@ export interface components {
       num_rows?: number | null;
       source: string;
       /** @enum {string} */
-      source_type: "local" | "duckdb";
+      source_type: "local" | "duckdb" | "connection";
       variable_name?: string | null;
     };
     DataTableColumn: {
       external_type: string;
       name: string;
+      sample_values: unknown[];
       type: components["schemas"]["DataType"];
     };
     /** @enum {string} */
-    DataType: "string" | "boolean" | "integer" | "number" | "date" | "unknown";
+    DataType:
+      | "string"
+      | "boolean"
+      | "integer"
+      | "number"
+      | "date"
+      | "datetime"
+      | "time"
+      | "unknown";
     Datasets: {
       /** @enum {string|null} */
-      clear_channel?: "local" | "duckdb" | null;
+      clear_channel?: "local" | "duckdb" | "connection" | null;
       /** @enum {string} */
       name: "datasets";
       tables: components["schemas"]["DataTable"][];
@@ -1867,19 +2293,23 @@ export interface components {
       | components["schemas"]["MarimoStrictExecutionError"]
       | components["schemas"]["MarimoInterruptionError"]
       | components["schemas"]["MarimoSyntaxError"]
+      | components["schemas"]["MarimoInternalError"]
       | components["schemas"]["UnknownError"];
     ExecuteMultipleRequest: {
       cellIds: string[];
       codes: string[];
+      request?: components["schemas"]["HTTPRequest"];
       timestamp: number;
     };
     ExecuteScratchpadRequest: {
       code: string;
+      request?: components["schemas"]["HTTPRequest"];
     };
     ExecuteStaleRequest: Record<string, never>;
     ExecutionRequest: {
       cellId: string;
       code: string;
+      request?: components["schemas"]["HTTPRequest"];
       timestamp: number;
     };
     ExportAsHTMLRequest: {
@@ -1887,6 +2317,9 @@ export interface components {
       download: boolean;
       files: string[];
       includeCode: boolean;
+    };
+    ExportAsIPYNBRequest: {
+      download: boolean;
     };
     ExportAsMarkdownRequest: {
       download: boolean;
@@ -1986,6 +2419,7 @@ export interface components {
       return_value?: components["schemas"]["JSONType"];
       status: components["schemas"]["HumanReadableStatus"];
     };
+    HTTPRequest: null;
     HumanReadableStatus: {
       /** @enum {string} */
       code: "ok" | "error";
@@ -1994,6 +2428,9 @@ export interface components {
     };
     InstallMissingPackagesRequest: {
       manager: string;
+      versions: {
+        [key: string]: string;
+      };
     };
     InstallingPackageAlert: {
       /** @enum {string} */
@@ -2003,6 +2440,7 @@ export interface components {
       };
     };
     InstantiateRequest: {
+      autoRun: boolean;
       objectIds: string[];
       values: unknown[];
     };
@@ -2020,6 +2458,9 @@ export interface components {
     KernelReady: {
       app_config: {
         app_title?: string | null;
+        auto_download: ("html" | "markdown")[];
+        css_file?: string | null;
+        html_head_file?: string | null;
         layout_file?: string | null;
         /** @enum {string} */
         width: "normal" | "compact" | "medium" | "full";
@@ -2058,10 +2499,16 @@ export interface components {
               | string
               | number
               | boolean
+              | {
+                  [key: string]: unknown;
+                }
               | components["schemas"]["MIME"]
             )
           | null;
       } | null;
+    };
+    ListPackagesResponse: {
+      packages: components["schemas"]["PackageDescription"][];
     };
     MIME: Record<string, never>;
     MarimoAncestorPreventedError: {
@@ -2078,16 +2525,23 @@ export interface components {
       type: "ancestor-stopped";
     };
     MarimoConfig: {
-      ai: {
-        open_ai: {
-          api_key: string;
-          base_url: string;
-          model: string;
+      ai?: {
+        anthropic?: {
+          api_key?: string;
         };
+        google?: {
+          api_key?: string;
+        };
+        open_ai?: {
+          api_key?: string;
+          base_url?: string;
+          model?: string;
+        };
+        rules?: string;
       };
       completion: {
         activate_on_typing: boolean;
-        codeium_api_key: string | null;
+        codeium_api_key?: string | null;
         copilot: boolean | ("github" | "codeium");
       };
       display: {
@@ -2101,14 +2555,14 @@ export interface components {
         /** @enum {string} */
         theme: "light" | "dark" | "system";
       };
-      experimental: {
+      experimental?: {
         [key: string]: unknown;
       };
       formatting: {
         line_length: number;
       };
       keymap: {
-        overrides: {
+        overrides?: {
           [key: string]: string;
         };
         /** @enum {string} */
@@ -2135,6 +2589,10 @@ export interface components {
         browser: "default" | string;
         follow_symlink: boolean;
       };
+      snippets?: {
+        custom_paths?: string[];
+        include_default_snippets?: boolean;
+      };
     };
     MarimoExceptionRaisedError: {
       exception_type: string;
@@ -2149,6 +2607,12 @@ export interface components {
       name: string;
       path: string;
       sessionId?: string | null;
+    };
+    MarimoInternalError: {
+      error_id: string;
+      msg: string;
+      /** @enum {string} */
+      type: "internal";
     };
     MarimoInterruptionError: {
       /** @enum {string} */
@@ -2189,6 +2653,11 @@ export interface components {
       | components["schemas"]["QueryParamsClear"]
       | components["schemas"]["Datasets"]
       | components["schemas"]["DataColumnPreview"]
+      | {
+          connections: components["schemas"]["DataSourceConnection"][];
+          /** @enum {string} */
+          name: "data-source-connections";
+        }
       | components["schemas"]["FocusCell"]
       | components["schemas"]["UpdateCellCodes"]
       | components["schemas"]["UpdateCellIdsRequest"];
@@ -2197,6 +2666,9 @@ export interface components {
       | "application/json"
       | "application/vnd.marimo+error"
       | "application/vnd.marimo+traceback"
+      | "application/vnd.marimo+mimebundle"
+      | "application/vnd.vega.v5+json"
+      | "application/vnd.vegalite.v5+json"
       | "image/png"
       | "image/svg+xml"
       | "image/tiff"
@@ -2209,6 +2681,7 @@ export interface components {
       | "text/html"
       | "text/plain"
       | "text/markdown"
+      | "text/latex"
       | "text/csv";
     MissingPackageAlert: {
       isolated: boolean;
@@ -2226,11 +2699,34 @@ export interface components {
     OpenFileRequest: {
       path: string;
     };
+    OpenTutorialRequest: {
+      tutorialId:
+        | (
+            | "intro"
+            | "dataflow"
+            | "ui"
+            | "markdown"
+            | "plots"
+            | "sql"
+            | "layout"
+            | "fileformat"
+            | "for-jupyter-users"
+          )
+        | "markdown-format";
+    };
+    PackageDescription: {
+      name: string;
+      version: string;
+    };
+    PackageOperationResponse: {
+      error?: string | null;
+      success: boolean;
+    };
     PreviewDatasetColumnRequest: {
       columnName: string;
       source: string;
       /** @enum {string} */
-      sourceType: "local" | "duckdb";
+      sourceType: "local" | "duckdb" | "connection";
       tableName: string;
     };
     QueryParamsAppend: {
@@ -2269,6 +2765,9 @@ export interface components {
       /** @enum {string} */
       name: "reload";
     };
+    RemovePackageRequest: {
+      package: string;
+    };
     RemoveUIElements: {
       cell_id: string;
       /** @enum {string} */
@@ -2283,9 +2782,11 @@ export interface components {
     RunRequest: {
       cellIds: string[];
       codes: string[];
+      request?: components["schemas"]["HTTPRequest"];
     };
     RunScratchpadRequest: {
       code: string;
+      request?: components["schemas"]["HTTPRequest"];
     };
     RunningNotebooksResponse: {
       files: components["schemas"]["MarimoFile"][];
@@ -2331,6 +2832,7 @@ export interface components {
     };
     SetUIElementValueRequest: {
       objectIds: string[];
+      request?: components["schemas"]["HTTPRequest"];
       token: string;
       values: unknown[];
     };
@@ -2366,6 +2868,7 @@ export interface components {
     };
     UpdateCellCodes: {
       cell_ids: string[];
+      code_is_stale: boolean;
       codes: string[];
       /** @enum {string} */
       name: "update-cell-codes";

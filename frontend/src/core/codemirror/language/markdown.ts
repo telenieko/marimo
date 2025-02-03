@@ -17,6 +17,11 @@ import type { CompletionConfig } from "@/core/config/config-schema";
 import type { HotkeyProvider } from "@/core/hotkeys/hotkeys";
 import { indentOneTab } from "./utils/indentOneTab";
 import { type QuotePrefixKind, splitQuotePrefix } from "./utils/quotes";
+import {
+  markdownAutoRunExtension,
+  type MovementCallbacks,
+} from "../cells/extensions";
+import type { PlaceholderType } from "../config/extension";
 
 const quoteKinds = [
   ['"""', '"""'],
@@ -50,6 +55,10 @@ const regexes = pairs.map(
 export class MarkdownLanguageAdapter implements LanguageAdapter {
   readonly type = "markdown";
   readonly defaultCode = 'mo.md(r"""\n""")';
+
+  static fromMarkdown(markdown: string) {
+    return `mo.md(r"""\n${markdown}\n""")`;
+  }
 
   lastQuotePrefix: QuotePrefixKind = "";
 
@@ -120,22 +129,38 @@ export class MarkdownLanguageAdapter implements LanguageAdapter {
       return true;
     }
 
-    const markdownLines = pythonCode
-      .trim()
-      .split("\n")
-      .map((line) => line.startsWith("mo.md("))
-      .filter(Boolean);
-    if (markdownLines.length > 1) {
-      // more than line starting with mo.md(; as a heuristic,
-      // don't show "view as markdown"
-      return false;
+    // Handle mo.md("foo"), mo.plain_text("bar") in the same line
+    // If it starts with mo.md, but we have more than one function call, return false
+    if (pythonCode.trim().startsWith("mo.md(")) {
+      const tree = pythonLanguage.parser.parse(pythonCode);
+      let functionCallCount = 0;
+
+      // Parse the code using Lezer to check for multiple function calls
+      tree.iterate({
+        enter: (node) => {
+          if (node.name === "CallExpression") {
+            functionCallCount++;
+            if (functionCallCount > 1) {
+              return false; // Stop iterating if we've found more than one function call
+            }
+          }
+        },
+      });
+
+      // If the function call count is greater than 1, we don't want to show "view as markdown"
+      if (functionCallCount > 1) {
+        return false;
+      }
     }
+
     return regexes.some(([, regex]) => regex.test(pythonCode));
   }
 
   getExtension(
     _completionConfig: CompletionConfig,
     hotkeys: HotkeyProvider,
+    _: PlaceholderType,
+    movementCallbacks: MovementCallbacks,
   ): Extension[] {
     return [
       markdown({
@@ -172,8 +197,10 @@ export class MarkdownLanguageAdapter implements LanguageAdapter {
       enhancedMarkdownExtension(hotkeys),
       autocompletion({
         activateOnTyping: true,
-        override: [emojiCompletionSource],
+        override: [emojiCompletionSource, lucideIconCompletionSource],
       }),
+      // Markdown autorun
+      markdownAutoRunExtension(movementCallbacks),
       python().support,
     ];
   }
@@ -221,4 +248,59 @@ const getEmojiList = once(async (): Promise<Completion[]> => {
     apply: emoji,
     type: "emoji",
   }));
+});
+
+const lucideIconCompletionSource: CompletionSource = async (context) => {
+  // Check if the cursor is at a position where a Lucide icon can be inserted
+  if (!context.explicit && !context.matchBefore(/::[\w-]*$/)) {
+    return null;
+  }
+
+  const iconList = await getLucideIconList();
+  const filter = context.matchBefore(/::[\w-]*$/)?.text.slice(2) ?? "";
+
+  return {
+    from: context.pos - filter.length - 2,
+    options: iconList,
+    validFor: /^[\w-:]*$/,
+  };
+};
+
+// This loads Lucide icons from a CDN
+const getLucideIconList = once(async (): Promise<Completion[]> => {
+  const iconList = await fetch(
+    "https://unpkg.com/lucide-static@0.452.0/tags.json",
+  )
+    .then((res) => {
+      if (!res.ok) {
+        throw new Error("Failed to fetch Lucide icon list");
+      }
+      return res.json() as unknown as Record<string, string[]>;
+    })
+    .catch(() => {
+      // If we can't fetch the icon list, just return an empty list
+      return {};
+    });
+
+  const asSvg = (iconName: string) => {
+    return `https://cdn.jsdelivr.net/npm/lucide-static@0.452.0/icons/${iconName}.svg`;
+  };
+
+  return Object.entries(iconList).map(
+    ([iconName, aliases]): Completion => ({
+      label: `::${iconName}`,
+      displayLabel: iconName,
+      type: "lucide-icon",
+      boost: 10,
+      apply: `::lucide:${iconName}::`,
+      detail: aliases.join(", "),
+      info: () => {
+        const img = document.createElement("img");
+        img.src = asSvg(iconName);
+        img.style.width = "24px";
+        img.style.height = "24px";
+        return img;
+      },
+    }),
+  );
 });

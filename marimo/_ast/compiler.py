@@ -12,6 +12,7 @@ import token as token_types
 from tokenize import TokenInfo, tokenize
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+from marimo import _loggers
 from marimo._ast.cell import (
     Cell,
     CellId_t,
@@ -22,6 +23,8 @@ from marimo._ast.cell import (
 from marimo._ast.visitor import ImportData, Name, ScopedVisitor
 from marimo._utils.tmpdir import get_tmpdir
 from marimo._utils.variables import is_local
+
+LOGGER = _loggers.marimo_logger()
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -96,6 +99,7 @@ def compile_cell(
     cell_id: CellId_t,
     source_position: Optional[SourcePosition] = None,
     carried_imports: list[ImportData] | None = None,
+    test_rewrite: bool = False,
 ) -> CellImpl:
     # Replace non-breaking spaces with regular spaces -- some frontends
     # send nbsp in place of space, which is a syntax error.
@@ -117,8 +121,10 @@ def compile_cell(
             mod=module,
             defs=set(),
             refs=set(),
+            temporaries=set(),
             variable_data={},
             deleted_refs=set(),
+            language="python",
             body=None,
             last_expr=None,
             cell_id=cell_id,
@@ -161,11 +167,27 @@ def compile_cell(
         # since there is an actual file to read from.
         cache(filename, code)
 
+    # pytest assertion rewriting, gives more context for assertion failures.
+    if test_rewrite:
+        # pytest is not required, so fail gracefully if needed
+        try:
+            from _pytest.assertion.rewrite import (  # type: ignore
+                rewrite_asserts,
+            )
+
+            rewrite_asserts(module, code.encode("utf-8"), module_path=filename)
+        # general catch-all, in case of internal pytest API changes
+        except Exception:
+            LOGGER.warning(
+                "pytest is not installed, skipping assertion rewriting"
+            )
+
     flags = ast.PyCF_ALLOW_TOP_LEVEL_AWAIT
     body = compile(module, filename, mode="exec", flags=flags)
     last_expr = compile(expr, filename, mode="eval", flags=flags)
 
     nonlocals = {name for name in v.defs if not is_local(name)}
+    temporaries = v.defs - nonlocals
     variable_data = {
         name: v.variable_data[name]
         for name in nonlocals
@@ -193,12 +215,14 @@ def compile_cell(
         mod=module,
         defs=nonlocals,
         refs=v.refs,
+        temporaries=temporaries,
         variable_data=variable_data,
         import_workspace=ImportWorkspace(
             is_import_block=is_import_block,
             imported_defs=imported_defs,
         ),
         deleted_refs=v.deleted_refs,
+        language=v.language,
         body=body,
         last_expr=last_expr,
         cell_id=cell_id,
@@ -209,6 +233,7 @@ def cell_factory(
     f: Callable[..., Any],
     cell_id: CellId_t,
     anonymous_file: bool = False,
+    test_rewrite: bool = False,
 ) -> Cell:
     """Creates a cell from a function.
 
@@ -335,6 +360,9 @@ def cell_factory(
     return Cell(
         _name=f.__name__,
         _cell=compile_cell(
-            cell_code, cell_id=cell_id, source_position=source_position
+            cell_code,
+            cell_id=cell_id,
+            source_position=source_position,
+            test_rewrite=test_rewrite,
         ),
     )

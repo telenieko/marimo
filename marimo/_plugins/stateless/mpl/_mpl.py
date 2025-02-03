@@ -11,12 +11,14 @@ import asyncio
 import html
 import io
 import mimetypes
+import os
 import signal
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
+from marimo import _loggers
 from marimo._output.builder import h
 from marimo._output.formatting import as_html
 from marimo._output.hypertext import Html
@@ -28,9 +30,15 @@ from marimo._runtime.context import (
 )
 from marimo._runtime.context.kernel_context import KernelRuntimeContext
 from marimo._server.utils import find_free_port
+from marimo._utils.platform import is_pyodide
 from marimo._utils.signals import get_signals
 
+LOGGER = _loggers.marimo_logger()
+
 if TYPE_CHECKING:
+    from matplotlib.axes import Axes
+    from matplotlib.backends.backend_webagg_core import FigureManagerWebAgg
+    from matplotlib.figure import Figure, SubFigure
     from starlette.applications import Starlette
     from starlette.requests import Request
     from starlette.websockets import WebSocket
@@ -38,58 +46,94 @@ if TYPE_CHECKING:
 
 class FigureManagers:
     def __init__(self) -> None:
-        self.figure_managers: dict[str, Any] = {}
+        self.figure_managers: dict[str, FigureManagerWebAgg] = {}
 
-    def add(self, manager: Any) -> None:
+    def add(self, manager: FigureManagerWebAgg) -> None:
         self.figure_managers[str(manager.num)] = manager
 
-    def get(self, figure_id: str) -> Any:
+    def get(self, figure_id: str) -> FigureManagerWebAgg:
         if figure_id not in self.figure_managers:
             raise RuntimeError(f"Figure {figure_id} not found.")  # noqa: E501
         return self.figure_managers[str(figure_id)]
 
-    def remove(self, manager: Any) -> None:
+    def remove(self, manager: FigureManagerWebAgg) -> None:
         del self.figure_managers[str(manager.num)]
 
 
 figure_managers = FigureManagers()
 
 
-def _template(
-    host: str,
-    port: int,
-    fig_id: str,
-) -> str:
+def _get_host() -> str:
+    """
+    Get the host from environment variable or fall back to localhost.
+    """
+    host = os.environ.get("MARIMO_MPL_HOST", "localhost")
+    if not host or not isinstance(host, str):
+        return "localhost"
+    if "://" in host:
+        raise ValueError(
+            f"Invalid host '{host}': should not include protocol (http:// or https://)"
+        )
+    if "/" in host:
+        raise ValueError(f"Invalid host '{host}': should not include paths")
+    if ":" in host:
+        raise ValueError(
+            f"Invalid host '{host}': should not include port numbers"
+        )
+    return host
+
+
+def _get_secure() -> bool:
+    """
+    Get the secure status from environment variable or fall back to False.
+    """
+    secure = os.environ.get("MARIMO_MPL_SECURE", "false")
+    if not secure or not isinstance(secure, str):
+        return False
+    secure = secure.lower().strip()
+    if secure in ("true", "1", "yes", "on"):
+        return True
+    if secure in ("false", "0", "no", "off"):
+        return False
+
+    raise ValueError(
+        f"Invalid secure value '{secure}': should be 'true' or 'false'"
+    )
+
+
+def _template(fig_id: str, port: int) -> str:
     return html_content % {
-        "ws_uri": f"ws://{host}:{port}/ws?figure={fig_id}",
+        "ws_uri": f"/mpl/{port}/ws?figure={fig_id}",
         "fig_id": fig_id,
-        "base_url": f"http://{host}:{port}",
+        "port": port,
     }
 
 
-def create_application(
-    host: str,
-    port: int,
-) -> Starlette:
-    import matplotlib as mpl  # type: ignore
-    from matplotlib.backends.backend_webagg import (  # type: ignore
+def create_application() -> Starlette:
+    import matplotlib as mpl
+    from matplotlib.backends.backend_webagg_core import (
         FigureManagerWebAgg,
     )
     from starlette.applications import Starlette
     from starlette.responses import HTMLResponse, Response
     from starlette.routing import Mount, Route, WebSocketRoute
     from starlette.staticfiles import StaticFiles
+    from starlette.websockets import (
+        WebSocketDisconnect,
+        WebSocketState,
+    )
 
     async def main_page(request: Request) -> HTMLResponse:
         figure_id = request.query_params.get("figure")
         assert figure_id is not None
-        content = _template(host, port, figure_id)
+        port = request.app.state.port
+        content = _template(figure_id, port)
         return HTMLResponse(content=content)
 
     async def mpl_js(request: Request) -> Response:
         del request
         return Response(
-            content=FigureManagerWebAgg.get_javascript(),  # type: ignore
+            content=FigureManagerWebAgg.get_javascript(),  # type: ignore[no-untyped-call]
             media_type="application/javascript",
         )
 
@@ -114,8 +158,7 @@ def create_application(
 
     async def websocket_endpoint(websocket: WebSocket) -> None:
         await websocket.accept()
-
-        queue = asyncio.Queue[Tuple[Any, str]]()
+        queue: asyncio.Queue[Tuple[Any, str]] = asyncio.Queue()
 
         class SyncWebSocket:
             def send_json(self, content: str) -> None:
@@ -125,9 +168,26 @@ def create_application(
                 queue.put_nowait((blob, "binary"))
 
         figure_id = websocket.query_params.get("figure")
-        assert figure_id is not None
-        figure_manager = figure_managers.get(figure_id)
-        figure_manager.add_web_socket(SyncWebSocket())
+        if not figure_id:
+            await websocket.send_json(
+                {"type": "error", "message": "No figure ID provided"}
+            )
+            await websocket.close()
+            return
+
+        try:
+            figure_manager = figure_managers.get(figure_id)
+        except RuntimeError:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": f"Figure with id '{figure_id}' not found",
+                }
+            )
+            await websocket.close()
+            return
+
+        figure_manager.add_web_socket(SyncWebSocket())  # type: ignore[no-untyped-call]
 
         async def receive() -> None:
             try:
@@ -139,12 +199,15 @@ def create_application(
                         # to the figure manager
                         pass
                     else:
-                        figure_manager.handle_json(data)
-            except Exception:
+                        figure_manager.handle_json(data)  # type: ignore[no-untyped-call]
+            except WebSocketDisconnect:
                 pass
+            except Exception as e:
+                if websocket.application_state != WebSocketState.DISCONNECTED:
+                    await websocket.send_json(
+                        {"type": "error", "message": str(e)}
+                    )
             finally:
-                from starlette.websockets import WebSocketState
-
                 if websocket.application_state != WebSocketState.DISCONNECTED:
                     await websocket.close()
 
@@ -156,34 +219,43 @@ def create_application(
                         await websocket.send_json(data)
                     else:
                         await websocket.send_bytes(data)
-            except Exception:
+            except WebSocketDisconnect:
+                # Client disconnected normally
                 pass
+            except Exception as e:
+                if websocket.application_state != WebSocketState.DISCONNECTED:
+                    await websocket.send_json(
+                        {"type": "error", "message": str(e)}
+                    )
             finally:
-                from starlette.websockets import WebSocketState
-
                 if websocket.application_state != WebSocketState.DISCONNECTED:
                     await websocket.close()
 
-        await asyncio.gather(receive(), send())
+        try:
+            await asyncio.gather(receive(), send())
+        except Exception as e:
+            if websocket.application_state != WebSocketState.DISCONNECTED:
+                await websocket.send_json({"type": "error", "message": str(e)})
+                await websocket.close()
 
     return Starlette(
         routes=[
             Route("/", main_page, methods=["GET"]),
-            Route("/mpl/mpl.js", mpl_js, methods=["GET"]),
-            Route("/mpl/custom.css", mpl_custom_css, methods=["GET"]),
+            Route("/mpl.js", mpl_js, methods=["GET"]),
+            Route("/custom.css", mpl_custom_css, methods=["GET"]),
             Route("/download.{fmt}", download, methods=["GET"]),
             WebSocketRoute("/ws", websocket_endpoint),
             Mount(
-                "/mpl/_static",
+                "/_static",
                 StaticFiles(
-                    directory=FigureManagerWebAgg.get_static_file_path()  # type: ignore # noqa: E501
+                    directory=FigureManagerWebAgg.get_static_file_path()  # type: ignore[no-untyped-call]
                 ),
                 name="mpl_static",
             ),
             Mount(
                 "/_images",
                 StaticFiles(directory=Path(mpl.get_data_path(), "images")),
-                name="images",
+                name="mpl_images",
             ),
         ],
     )
@@ -192,17 +264,23 @@ def create_application(
 _app: Optional[Starlette] = None
 
 
-def get_or_create_application() -> Starlette:
+def get_or_create_application(
+    app_host: Optional[str] = None,
+    free_port: Optional[int] = None,
+    secure_host: Optional[bool] = None,
+) -> Starlette:
     global _app
 
     import uvicorn
 
     if _app is None:
-        host = "localhost"
-        port = find_free_port(10_000)
-        app = create_application(host, port)
+        host = app_host if app_host is not None else _get_host()
+        port = free_port if free_port is not None else find_free_port(10_000)
+        secure = secure_host if secure_host is not None else _get_secure()
+        app = create_application()
         app.state.host = host
         app.state.port = port
+        app.state.secure = secure
         _app = app
 
         def start_server() -> None:
@@ -227,40 +305,62 @@ def get_or_create_application() -> Starlette:
     return _app
 
 
+def new_figure_manager_given_figure(
+    num: int, figure: Union[Figure, SubFigure, Axes]
+) -> Any:
+    from matplotlib.backends.backend_webagg_core import (
+        FigureCanvasWebAggCore,
+        FigureManagerWebAgg as CoreFigureManagerWebAgg,
+        NavigationToolbar2WebAgg as CoreNavigationToolbar2WebAgg,
+    )
+
+    class FigureManagerWebAgg(CoreFigureManagerWebAgg):
+        _toolbar2_class = CoreNavigationToolbar2WebAgg  # type: ignore[assignment]
+
+    class FigureCanvasWebAgg(FigureCanvasWebAggCore):
+        manager_class = FigureManagerWebAgg  # type: ignore[assignment]
+
+    canvas = FigureCanvasWebAgg(figure)  # type: ignore[no-untyped-call]
+    manager = FigureManagerWebAgg(canvas, num)  # type: ignore[no-untyped-call]
+    return manager
+
+
 @mddoc
-def interactive(figure: "Figure | Axes") -> Html:  # type: ignore[name-defined] # noqa:F821,E501
+def interactive(figure: Union[Figure, SubFigure, Axes]) -> Html:
     """Render a matplotlib figure using an interactive viewer.
 
     The interactive viewer allows you to pan, zoom, and see plot coordinates
     on mouse hover.
 
-    **Example**:
+    Example:
+        ```python
+        plt.plot([1, 2])
+        # plt.gcf() gets the current figure
+        mo.mpl.interactive(plt.gcf())
+        ```
 
-    ```python
-    plt.plot([1, 2])
-    # plt.gcf() gets the current figure
-    mo.mpl.interactive(plt.gcf())
-    ```
+    Args:
+        figure (matplotlib Figure or Axes): A matplotlib `Figure` or `Axes` object.
 
-    **Args**:
-
-    - figure: a matplotlib `Figure` or `Axes` object
-
-    **Returns**:
-
-    - An interactive matplotlib figure as an `Html` object
+    Returns:
+        Html: An interactive matplotlib figure as an `Html` object.
     """
+    # We can't support interactive plots in Pyodide
+    # since they require a WebSocket connection
+    if is_pyodide():
+        LOGGER.error(
+            "Interactive plots are not supported in Pyodide/WebAssembly"
+        )
+        return as_html(figure)
+
     # No top-level imports of matplotlib, since it isn't a required
     # dependency
-    from matplotlib.axes import (  # type: ignore[import-not-found,import-untyped,unused-ignore] # noqa: E501
-        Axes,
-    )
-    from matplotlib.backends.backend_webagg import (  # type: ignore
-        new_figure_manager_given_figure,
-    )
+    from matplotlib.axes import Axes
 
     if isinstance(figure, Axes):
-        figure = figure.get_figure()
+        maybe_figure = figure.get_figure()
+        assert maybe_figure is not None, "Axes object does not have a Figure"
+        figure = maybe_figure
 
     ctx = get_context()
     if not isinstance(ctx, KernelRuntimeContext):
@@ -271,9 +371,8 @@ def interactive(figure: "Figure | Axes") -> Html:  # type: ignore[name-defined] 
 
     # TODO(akshayka): Proxy this server through the marimo server to help with
     # deployment.
-    application = get_or_create_application()
-    host = application.state.host
-    port = application.state.port
+    app = get_or_create_application()
+    port = app.state.port
 
     class CleanupHandle(CellLifecycleItem):
         def create(self, context: RuntimeContext) -> None:
@@ -290,11 +389,10 @@ def interactive(figure: "Figure | Axes") -> Html:  # type: ignore[name-defined] 
     ctx.cell_lifecycle_registry.add(CleanupHandle())
     ctx.stream.cell_id = ctx.execution_context.cell_id
 
-    content = _template(host, port, str(figure_manager.num))
+    content = _template(str(figure_manager.num), port)
 
     return Html(
         h.iframe(
-            # srcdoc allows us to use __resizeIframe
             srcdoc=html.escape(content),
             width="100%",
             height="550px",
@@ -306,14 +404,14 @@ def interactive(figure: "Figure | Axes") -> Html:  # type: ignore[name-defined] 
 html_content = """
 <!DOCTYPE html>
 <html lang="en">
-  <base href="%(base_url)s" />
   <head>
-    <link rel="stylesheet" href="mpl/_static/css/page.css" type="text/css" />
-    <link rel="stylesheet" href="mpl/_static/css/boilerplate.css" type="text/css" />
-    <link rel="stylesheet" href="mpl/_static/css/fbm.css" type="text/css" />
-    <link rel="stylesheet" href="mpl/_static/css/mpl.css" type="text/css" />
-    <link rel="stylesheet" href="mpl/custom.css" type="text/css" />
-    <script src="mpl/mpl.js"></script>
+    <base href='/mpl/%(port)s/    ' />
+    <link rel="stylesheet" href="/mpl/%(port)s/_static/css/page.css" type="text/css" />
+    <link rel="stylesheet" href="/mpl/%(port)s/_static/css/boilerplate.css" type="text/css" />
+    <link rel="stylesheet" href="/mpl/%(port)s/_static/css/fbm.css" type="text/css" />
+    <link rel="stylesheet" href="/mpl/%(port)s/_static/css/mpl.css" type="text/css" />
+    <link rel="stylesheet" href="/mpl/%(port)s/custom.css" type="text/css" />
+    <script src="/mpl/%(port)s/mpl.js"></script>
 
     <script>
       function ondownload(figure, format) {

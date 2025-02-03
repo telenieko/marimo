@@ -68,11 +68,9 @@ class VirtualFile:
         if not as_data_url:
             self.url = url or f"./@file/{len(buffer)}-{filename}"
         else:
+            mimetype = mimetypes.guess_type(self.filename)[0] or "text/plain"
             self.url = url or build_data_url(
-                mimetype=cast(
-                    KnownMimeType,
-                    mimetypes.guess_type(self.filename)[0],
-                ),
+                mimetype=cast(KnownMimeType, mimetype),
                 data=base64.b64encode(buffer),
             )
 
@@ -273,7 +271,7 @@ class VirtualFileRegistry:
             return
         try:
             self.shutting_down = True
-            for _, item in self.registry.items():
+            for item in self.registry.values():
                 if sys.platform == "win32":
                     item.shm.close()
                 item.shm.unlink()

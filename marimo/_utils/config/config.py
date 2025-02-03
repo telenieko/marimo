@@ -1,4 +1,6 @@
 # Copyright 2024 Marimo. All rights reserved.
+from __future__ import annotations
+
 import os
 from dataclasses import asdict
 from tempfile import TemporaryDirectory
@@ -33,8 +35,8 @@ class ConfigReader:
         try:
             with open(self.filepath, "r") as file:
                 data = tomlkit.parse(file.read())
-                return parse_raw(data, cls)
-        except FileNotFoundError:
+                return parse_raw(data, cls, allow_unknown_keys=True)
+        except (FileNotFoundError, tomlkit.exceptions.TOMLKitError):
             return fallback
 
     def write_toml(self, data: Any) -> None:

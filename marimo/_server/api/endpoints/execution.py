@@ -1,18 +1,25 @@
 # Copyright 2024 Marimo. All rights reserved.
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import asyncio
+from typing import TYPE_CHECKING, Optional
 from uuid import uuid4
 
 from starlette.authentication import requires
+from starlette.responses import JSONResponse
 
 from marimo import _loggers
+from marimo._messaging.ops import Alert
 from marimo._runtime.requests import (
     FunctionCallRequest,
+    HTTPRequest,
     SetUIElementValueRequest,
 )
 from marimo._server.api.deps import AppState
+from marimo._server.api.endpoints.ws import FILE_QUERY_PARAM_KEY
 from marimo._server.api.utils import parse_request
+from marimo._server.file_router import MarimoFileKey
+from marimo._server.ids import ConsumerId
 from marimo._server.models.models import (
     BaseResponse,
     InstantiateRequest,
@@ -56,8 +63,12 @@ async def set_ui_element_values(
     body = await parse_request(request, cls=UpdateComponentValuesRequest)
     app_state.require_current_session().put_control_request(
         SetUIElementValueRequest(
-            object_ids=body.object_ids, values=body.values, token=str(uuid4())
-        )
+            object_ids=body.object_ids,
+            values=body.values,
+            token=str(uuid4()),
+            request=HTTPRequest.from_request(request),
+        ),
+        from_consumer_id=ConsumerId(app_state.require_current_session_id()),
     )
 
     return SuccessResponse()
@@ -84,7 +95,10 @@ async def instantiate(
     """
     app_state = AppState(request)
     body = await parse_request(request, cls=InstantiateRequest)
-    app_state.require_current_session().instantiate(body)
+    app_state.require_current_session().instantiate(
+        body,
+        http_request=HTTPRequest.from_request(request),
+    )
 
     return SuccessResponse()
 
@@ -110,7 +124,10 @@ async def function_call(
     """
     app_state = AppState(request)
     body = await parse_request(request, cls=FunctionCallRequest)
-    app_state.require_current_session().put_control_request(body)
+    app_state.require_current_session().put_control_request(
+        body,
+        from_consumer_id=ConsumerId(app_state.require_current_session_id()),
+    )
 
     return SuccessResponse()
 
@@ -158,8 +175,10 @@ async def run_cell(
     """  # noqa: E501
     app_state = AppState(request)
     body = await parse_request(request, cls=RunRequest)
+    body.request = HTTPRequest.from_request(request)
     app_state.require_current_session().put_control_request(
-        body.as_execution_request()
+        body.as_execution_request(),
+        from_consumer_id=ConsumerId(app_state.require_current_session_id()),
     )
 
     return SuccessResponse()
@@ -188,7 +207,8 @@ async def run_scratchpad(
     app_state = AppState(request)
     body = await parse_request(request, cls=RunScratchpadRequest)
     app_state.require_current_session().put_control_request(
-        body.as_execution_request()
+        body.as_execution_request(),
+        from_consumer_id=ConsumerId(app_state.require_current_session_id()),
     )
 
     return SuccessResponse()
@@ -261,3 +281,57 @@ async def shutdown(
         shutdown_server()
 
     return SuccessResponse()
+
+
+@router.post("/takeover")
+@requires("edit")
+async def takeover_endpoint(
+    *,
+    request: Request,
+) -> JSONResponse:
+    """
+    responses:
+    200:
+        description: Successfully closed existing sessions
+        content:
+            application/json:
+                schema:
+                    type: object
+                    properties:
+                        status:
+                            type: string
+    """
+    app_state = AppState(request)
+
+    file_key: Optional[MarimoFileKey] = (
+        app_state.query_params(FILE_QUERY_PARAM_KEY)
+        or app_state.session_manager.file_router.get_unique_file_key()
+    )
+    if file_key is None:
+        LOGGER.error("No file key provided")
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Cannot take over session."},
+        )
+
+    # Find and close any existing sessions for this file
+    existing_session = app_state.session_manager.get_session_by_file_key(
+        file_key
+    )
+    if existing_session is not None:
+        # Send a disconnect message to the client
+        existing_session.write_operation(
+            Alert(
+                title="Session taken over",
+                description="Another user has taken over this session.",
+                variant="danger",
+            ),
+            from_consumer_id=None,
+        )
+        # Wait 100ms to ensure the client has received the message
+        await asyncio.sleep(0.1)
+        existing_session.maybe_disconnect_consumer()
+    else:
+        LOGGER.warning("No existing session found for file key %s", file_key)
+
+    return JSONResponse(status_code=200, content={"status": "ok"})

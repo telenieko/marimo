@@ -10,7 +10,7 @@ from marimo._dependencies.dependencies import DependencyManager
 from marimo._output.builder import h
 from marimo._output.hypertext import Html
 from marimo._output.rich_help import mddoc
-from marimo._output.utils import create_style
+from marimo._output.utils import create_style, normalize_dimension
 from marimo._plugins.core.media import io_to_data_url
 
 Image = Union[str, bytes, io.BytesIO, io.BufferedReader]
@@ -21,8 +21,7 @@ ImageLike = Union[Image, Tensor]
 
 
 def _normalize_image(src: ImageLike) -> Image:
-    """
-    Normalize an image-like object to a standard format.
+    """Normalize an image-like object to a standard format.
 
     This function handles a variety of input types, including lists, arrays,
     and tensors, and converts them to a BytesIO object representing a PNG
@@ -36,20 +35,17 @@ def _normalize_image(src: ImageLike) -> Image:
     `toarray` method, which is general enough that a specific check is
     performed here.
 
-    **Args.**
+    Args:
+        src: An image-like object. This can be a list, array, tensor, or a
+            file-like object.
 
-    - `src`: An image-like object. This can be a list, array, tensor, or a
-        file-like object.
+    Returns:
+        A BytesIO object or other Image type.
 
-    **Returns.**
-
-    A BytesIO object or other Image type.
-
-    **Raises.**
-
-    - `ModuleNotFoundError`: If the required `PIL` or `numpy` packages are not
-        available.
-    - `ValueError`: If the input is not a valid image-like object.
+    Raises:
+        ModuleNotFoundError: If the required `PIL` or `numpy` packages are not
+            available.
+        ValueError: If the input is not a valid image-like object.
     """
     if (
         isinstance(src, list)
@@ -89,44 +85,44 @@ def _normalize_image(src: ImageLike) -> Image:
 def image(
     src: ImageLike,
     alt: Optional[str] = None,
-    width: Optional[int] = None,
-    height: Optional[int] = None,
+    width: Optional[Union[int, str]] = None,
+    height: Optional[Union[int, str]] = None,
     rounded: bool = False,
     style: Optional[dict[str, Any]] = None,
+    caption: Optional[str] = None,
 ) -> Html:
     """Render an image as HTML.
 
-    **Examples.**
+    Examples:
+        ```python3
+        # Render an image from a local file
+        mo.image(src="path/to/image.png")
+        ```
 
-    ```python3
-    # Render an image from a local file
-    mo.image(src="path/to/image.png")
-    ```
+        ```python3
+        # Render an image from a URL
+        mo.image(
+            src="https://marimo.io/logo.png",
+            alt="Marimo logo",
+            width=100,
+            height=100,
+            rounded=True,
+            caption="Marimo logo",
+        )
+        ```
 
-    ```python3
-    # Render an image from a URL
-    mo.image(
-        src="https://marimo.io/logo.png",
-        alt="Marimo logo",
-        width=100,
-        height=100,
-        rounded=True,
-    )
-    ```
+    Args:
+        src: a path or URL to an image, a file-like object
+            (opened in binary mode), or array-like object.
+        alt: the alt text of the image
+        width: the width of the image in pixels or a string with units
+        height: the height of the image in pixels or a string with units
+        rounded: whether to round the corners of the image
+        style: a dictionary of CSS styles to apply to the image
+        caption: the caption of the image
 
-    **Args.**
-
-    - `src`: a path or URL to an image, a file-like object
-        (opened in binary mode), or array-like object.
-    - `alt`: the alt text of the image
-    - `width`: the width of the image in pixels
-    - `height`: the height of the image in pixels
-    - `rounded`: whether to round the corners of the image
-    - `style`: a dictionary of CSS styles to apply to the image
-
-    **Returns.**
-
-    `Html` object
+    Returns:
+        `Html` object
     """
     # Convert to virtual file
     resolved_src: Optional[str]
@@ -151,11 +147,25 @@ def image(
 
     styles = create_style(
         {
-            "width": f"{width}px" if width is not None else None,
-            "height": f"{height}px" if height is not None else None,
+            "width": normalize_dimension(width),
+            "height": normalize_dimension(height),
             "border-radius": "4px" if rounded else None,
             **(style or {}),
         }
     )
     img = h.img(src=resolved_src, alt=alt, style=styles)
+    if caption is not None:
+        return Html(
+            h.figure(
+                [
+                    img,
+                    h.figcaption(
+                        [caption],
+                        style="color: var(--muted-foreground); "
+                        "text-align: center; margin-top: 0.5rem;",
+                    ),
+                ],
+                style="display: flex; flex-direction: column;",
+            )
+        )
     return Html(img)

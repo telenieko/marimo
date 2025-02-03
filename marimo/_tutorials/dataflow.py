@@ -2,7 +2,7 @@
 
 import marimo
 
-__generated_with = "0.6.0"
+__generated_with = "0.9.30"
 app = marimo.App()
 
 
@@ -26,7 +26,7 @@ def __(mo):
 @app.cell(hide_code=True)
 def __(mo):
     mo.md(
-        rf"""
+        r"""
         **Tip: disabling automatic execution.**
 
         marimo lets you disable automatic execution: just go into the notebook settings
@@ -512,7 +512,7 @@ def __(mo, tips):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def __(mo):
     mo.md(
         """
@@ -620,18 +620,18 @@ def __():
             computations (see the next tip).
             """
         ),
-        "Cache intermediate computations with `@functools.cache`": (
+        "Cache intermediate computations with `@mo.cache`": (
             """
-            Use Python's builtin `functools` library to cache expensive
-            intermediate computations. You can do this if you abstract complex
-            logic into idempotent functions, following earlier tips.
+            Use `mo.cache` to cache the return value of expensive functions.
+            You can do this if you abstract complex logic into idempotent
+            functions, following earlier tips.
 
             For example:
 
             ```python3
-            import functools
+            import marimo as mo
 
-            @functools.cache
+            @mo.cache
             def compute_prediction(problem_parameters):
               ...
             ```
@@ -641,6 +641,10 @@ def __():
             and store them in a cache. The next time it is called with the same
             parameters, instead of recomputing the predictions, it will just 
             fetch the previously computed ones from the cache.
+
+            If you are familiar with `functools.cache`, `mo.cache` is
+            similar but more robust, with the cache persisting even
+            if the cell defining the function is re-run.
             """
         ),
     }
@@ -650,7 +654,6 @@ def __():
 @app.cell
 def __():
     import marimo as mo
-
     return (mo,)
 
 

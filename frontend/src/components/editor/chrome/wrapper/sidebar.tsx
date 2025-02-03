@@ -23,7 +23,7 @@ export const Sidebar: React.FC = () => {
   );
 
   return (
-    <div className="h-full pt-4 pb-1 px-1 flex flex-col items-start text-muted-foreground text-md select-none no-print text-sm z-50 dark:bg-background print:hidden">
+    <div className="h-full pt-4 pb-1 px-1 flex flex-col items-start text-muted-foreground text-md select-none no-print text-sm z-50 dark:bg-background print:hidden hide-on-fullscreen">
       {sidebarItems.map((p) => (
         <SidebarItem
           key={p.type}
@@ -48,14 +48,28 @@ export const Sidebar: React.FC = () => {
 const QueuedOrRunningStack = () => {
   const count = useAtomValue(notebookQueuedOrRunningCountAtom);
   return (
-    <div className="flex flex-col-reverse gap-[1px] overflow-hidden">
-      {Array.from({ length: count }).map((_, index) => (
-        <div
-          key={index.toString()}
-          className="flex-shrink-0 h-1 w-2 bg-[var(--grass-6)] border border-[var(--grass-7)]"
-        />
-      ))}
-    </div>
+    <Tooltip
+      content={
+        count > 0 ? (
+          <span>
+            {count} cell{count > 1 ? "s" : ""} queued or running
+          </span>
+        ) : (
+          "No cells queued or running"
+        )
+      }
+      side="right"
+      delayDuration={200}
+    >
+      <div className="flex flex-col-reverse gap-[1px] overflow-hidden">
+        {Array.from({ length: count }).map((_, index) => (
+          <div
+            key={index.toString()}
+            className="flex-shrink-0 h-1 w-2 bg-[var(--grass-6)] border border-[var(--grass-7)]"
+          />
+        ))}
+      </div>
+    </Tooltip>
   );
 };
 

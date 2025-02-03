@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from typing import Generator
 
@@ -68,7 +69,7 @@ def test_rename_to_existing_filename(app_file_manager: AppFileManager) -> None:
     try:
         with pytest.raises(HTTPException) as e:  # noqa: PT012
             app_file_manager.rename(existing_filename)
-            assert e.value == HTTPStatus.BAD_REQUEST
+        assert e.value.status_code == HTTPStatus.BAD_REQUEST
     finally:
         os.remove(existing_filename)
 
@@ -91,7 +92,7 @@ def test_rename_exception(app_file_manager: AppFileManager) -> None:
     new_filename = "/invalid/path/new_filename.py"
     with pytest.raises(HTTPException) as e:  # noqa: PT012
         app_file_manager.rename(new_filename)
-        assert e.value.status_code == HTTPStatus.SERVER_ERROR
+    assert e.value.status_code == HTTPStatus.SERVER_ERROR
 
 
 def test_rename_create_new_file(app_file_manager: AppFileManager) -> None:
@@ -104,6 +105,24 @@ def test_rename_create_new_file(app_file_manager: AppFileManager) -> None:
         assert os.path.exists(new_filename)
     finally:
         os.remove(new_filename)
+
+
+def test_rename_create_new_directory_file(
+    app_file_manager: AppFileManager,
+) -> None:
+    app_file_manager.filename = None
+    new_directory = "new_directory"
+    new_filename = os.path.join(new_directory, "new_file.py")
+    if os.path.exists(new_filename):
+        os.remove(new_filename)
+    if os.path.exists(new_directory):
+        os.rmdir(new_directory)
+    try:
+        app_file_manager.rename(new_filename)
+        assert os.path.exists(new_filename)
+    finally:
+        os.remove(new_filename)
+        os.rmdir(new_directory)
 
 
 def test_rename_different_filetype(app_file_manager: AppFileManager) -> None:
@@ -135,11 +154,15 @@ def test_save_app_config_valid(app_file_manager: AppFileManager) -> None:
         os.remove(app_file_manager.filename)
 
 
+@pytest.mark.skipif(
+    condition=sys.platform == "win32",
+    reason="filename is not invalid on Windows",
+)
 def test_save_app_config_exception(app_file_manager: AppFileManager) -> None:
     app_file_manager.filename = "/invalid/path/app_config.py"
     with pytest.raises(HTTPException) as e:  # noqa: PT012
         app_file_manager.save_app_config({})
-        assert e.value.status_code == HTTPStatus.SERVER_ERROR
+    assert e.value.status_code == HTTPStatus.SERVER_ERROR
 
 
 def test_save_filename_change_not_allowed(
@@ -149,7 +172,7 @@ def test_save_filename_change_not_allowed(
     save_request.filename = "new.py"
     with pytest.raises(HTTPException) as e:  # noqa: PT012
         app_file_manager.save(save_request)
-        assert e.value.status_code == HTTPStatus.BAD_REQUEST
+    assert e.value.status_code == HTTPStatus.BAD_REQUEST
 
 
 def test_save_existing_filename(app_file_manager: AppFileManager) -> None:
@@ -160,7 +183,7 @@ def test_save_existing_filename(app_file_manager: AppFileManager) -> None:
     try:
         with pytest.raises(HTTPException) as e:  # noqa: PT012
             app_file_manager.save(save_request)
-            assert e.value.status_code == HTTPStatus.BAD_REQUEST
+        assert e.value.status_code == HTTPStatus.BAD_REQUEST
     finally:
         os.remove(existing_filename)
 
@@ -216,9 +239,9 @@ def test_to_code(app_file_manager: AppFileManager) -> None:
             "",
             "",
             "@app.cell",
-            "def __():",
+            "def _():",
             "    import marimo as mo",
-            "    return mo,",
+            "    return (mo,)",
             "",
             "",
             'if __name__ == "__main__":',
@@ -226,3 +249,183 @@ def test_to_code(app_file_manager: AppFileManager) -> None:
             "",
         ]
     )
+
+
+def test_reload_reorders_cells() -> None:
+    """Test that reload() reorders cell IDs based on similarity to previous cells."""
+    # Create a temporary file with initial content
+    temp_file = tempfile.NamedTemporaryFile(suffix=".py", delete=False)
+    initial_content = """
+import marimo
+__generated_with = "0.0.1"
+app = marimo.App()
+
+@app.cell
+def cell1():
+    x = 1
+    return x
+
+@app.cell
+def cell2():
+    y = 2
+    return y
+
+if __name__ == "__main__":
+    app.run()
+"""
+    temp_file.write(initial_content.encode())
+    temp_file.close()
+
+    # Initialize AppFileManager with the temp file
+    manager = AppFileManager(filename=temp_file.name)
+    original_cell_ids = list(manager.app.cell_manager.cell_ids())
+    assert original_cell_ids == ["Hbol", "MJUe"]
+
+    # Modify the file content - swap the cells but keep similar content
+    modified_content = """
+import marimo
+__generated_with = "0.0.1"
+app = marimo.App()
+
+@app.cell
+def cell2():
+    y = 2
+    return y
+
+@app.cell
+def cell1():
+    x = 1
+    return x
+
+if __name__ == "__main__":
+    app.run()
+"""
+    with open(temp_file.name, "w") as f:
+        f.write(modified_content)
+
+    # Reload the file
+    manager.reload()
+
+    # The cell IDs should be reordered to match the original code
+    reloaded_cell_ids = list(manager.app.cell_manager.cell_ids())
+    assert len(reloaded_cell_ids) == len(original_cell_ids)
+    assert reloaded_cell_ids == ["MJUe", "Hbol"]
+
+    # Clean up
+    os.remove(temp_file.name)
+
+
+def test_reload_updates_content() -> None:
+    """Test that reload() updates the file contents correctly."""
+    # Create a temporary file with initial content
+    temp_file = tempfile.NamedTemporaryFile(suffix=".py", delete=False)
+    initial_content = """
+import marimo
+__generated_with = "0.0.1"
+app = marimo.App()
+
+@app.cell
+def cell1():
+    x = 1
+    return x
+
+if __name__ == "__main__":
+    app.run()
+"""
+    temp_file.write(initial_content.encode())
+    temp_file.close()
+
+    # Initialize AppFileManager with the temp file
+    manager = AppFileManager(filename=temp_file.name)
+    original_code = list(manager.app.cell_manager.codes())[0]
+    assert "x = 1" in original_code
+
+    # Modify the file content
+    modified_content = """
+import marimo
+__generated_with = "0.0.1"
+app = marimo.App()
+
+@app.cell
+def cell1():
+    x = 42  # Changed value
+    return x
+
+if __name__ == "__main__":
+    app.run()
+"""
+    with open(temp_file.name, "w") as f:
+        f.write(modified_content)
+
+    # Reload the file
+    manager.reload()
+
+    # Check that the code was updated
+    reloaded_code = list(manager.app.cell_manager.codes())[0]
+    assert "x = 42" in reloaded_code
+    assert "x = 1" not in reloaded_code
+
+    # Clean up
+    os.remove(temp_file.name)
+
+
+def test_reload_updates_new_cell() -> None:
+    """Test that reload() updates the file contents correctly."""
+
+    # Create a temp file with initial content
+    temp_file = tempfile.NamedTemporaryFile(suffix=".py", delete=False)
+    initial_content = """
+import marimo
+app = marimo.App()
+
+@app.cell
+def cell1():
+    x = 1
+    return x
+
+if __name__ == "__main__":
+    app.run()
+"""
+    temp_file.write(initial_content.encode())
+    temp_file.close()
+
+    # Initialize AppFileManager with the temp file
+    manager = AppFileManager(filename=temp_file.name)
+    assert len(list(manager.app.cell_manager.codes())) == 1
+    original_cell_ids = list(manager.app.cell_manager.cell_ids())
+    assert original_cell_ids == ["Hbol"]
+
+    # Modify the file content to add a new cell
+    modified_content = """
+import marimo
+app = marimo.App()
+
+@app.cell
+def cell2():
+    y = 2
+    return y
+
+@app.cell
+def cell1():
+    x = 1
+    return x
+
+if __name__ == "__main__":
+    app.run()
+"""
+    with open(temp_file.name, "w") as f:
+        f.write(modified_content)
+
+    # Reload the file
+    manager.reload()
+
+    # Check that the new cell was added
+    codes = list(manager.app.cell_manager.codes())
+    assert len(codes) == 2
+    assert "y = 2" in codes[0]
+    assert "x = 1" in codes[1]
+    next_cell_ids = list(manager.app.cell_manager.cell_ids())
+    assert next_cell_ids == ["MJUe", "Hbol"]
+
+    # Clean up
+    os.remove(temp_file.name)

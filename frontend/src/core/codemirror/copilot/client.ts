@@ -7,6 +7,9 @@ import { Transport } from "@open-rpc/client-js/build/transports/Transport";
 import type { JSONRPCRequestData } from "@open-rpc/client-js/build/Request";
 import { waitForEnabledCopilot } from "./state";
 import { waitForWs } from "@/utils/waitForWs";
+import { resolveToWsUrl } from "@/core/websocket/createWsUrl";
+import { Logger } from "@/utils/Logger";
+import { toast } from "@/components/ui/use-toast";
 
 // Dummy file for the copilot language server
 export const COPILOT_FILENAME = "/marimo.py";
@@ -24,35 +27,65 @@ export const createWSTransport = once(() => {
  */
 class LazyWebsocketTransport extends Transport {
   private delegate: WebSocketTransport | undefined;
+  private readonly WS_URL = resolveToWsUrl("lsp/copilot");
 
   constructor() {
     super();
     this.delegate = undefined;
   }
 
+  private async tryConnect(retries = 3, delayMs = 1000): Promise<void> {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        // Create delegate, if it doesn't exist
+        if (!this.delegate) {
+          this.delegate = new WebSocketTransport(this.WS_URL);
+        }
+        await this.delegate.connect();
+        Logger.log("Copilot#connect: Connected successfully");
+        return;
+      } catch (error) {
+        Logger.warn(
+          `Copilot#connect: Connection attempt ${attempt}/${retries} failed`,
+          error,
+        );
+        if (attempt === retries) {
+          this.delegate = undefined;
+          // Show error toast on final retry
+          toast({
+            variant: "danger",
+            title: "GitHub Copilot Connection Error",
+            description:
+              "Failed to connect to GitHub Copilot. Please check settings and try again.",
+          });
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+
   override async connect() {
     // Wait for copilot to be enabled
     await waitForEnabledCopilot();
-    // Wait for ws to be available
-    await waitForWs(createWsUrl(), 3);
+    // Wait for ws to be available with retries
+    await waitForWs(this.WS_URL, 3);
 
-    // Create delegate, if it doesn't exist
-    if (!this.delegate) {
-      this.delegate = new WebSocketTransport(createWsUrl());
-    }
-
-    // Connect
-    return this.delegate.connect();
+    // Try connecting with retries
+    return this.tryConnect();
   }
 
   override close() {
     this.delegate?.close();
+    this.delegate = undefined;
   }
 
   override async sendData(
     data: JSONRPCRequestData,
-    timeout?: number | null | undefined,
+    timeout: number | null | undefined,
   ) {
+    // Clamp timeout to 5 seconds
+    timeout = Math.min(timeout ?? 5000, 5000);
     return this.delegate?.sendData(data, timeout);
   }
 }
@@ -77,17 +110,4 @@ export function copilotServer() {
     client: getCopilotClient(),
     languageId: LANGUAGE_ID,
   });
-}
-
-const DEVELOPMENT_WS_PORT = 27_180;
-export function createWsUrl(): string {
-  // TODO: this should be configurable, but instead we add a 0 and hope it is free
-  // NOTE: window.location.port may also be empty if running behind a proxy
-  // (plain 80 or 443 just gives a protocol), so default to the development port.
-  const LSP_PORT =
-    process.env.NODE_ENV === "development" || !window.location.port
-      ? DEVELOPMENT_WS_PORT
-      : `${window.location.port}0`;
-  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${protocol}://${window.location.hostname}:${LSP_PORT}/copilot`;
 }

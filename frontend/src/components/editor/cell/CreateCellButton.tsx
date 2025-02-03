@@ -12,6 +12,7 @@ import { MarkdownLanguageAdapter } from "@/core/codemirror/language/markdown";
 import { MarkdownIcon, PythonIcon } from "./code/icons";
 import { SQLLanguageAdapter } from "@/core/codemirror/language/sql";
 import { cn } from "@/utils/cn";
+import { Events } from "@/utils/events";
 
 export const CreateCellButton = ({
   appClosed,
@@ -31,6 +32,7 @@ export const CreateCellButton = ({
             "shoulder-button hover-action",
             appClosed && " inactive-button",
           )}
+          onMouseDown={Events.preventFocus}
           shape="circle"
           size="small"
           color="hint-green"
@@ -64,7 +66,7 @@ const CreateCellButtonContextMenu = (props: {
             onClick({ code: "" });
           }}
         >
-          <div className="mr-3">
+          <div className="mr-3 text-muted-foreground">
             <PythonIcon />
           </div>
           Python cell
@@ -77,7 +79,7 @@ const CreateCellButtonContextMenu = (props: {
             onClick({ code: new MarkdownLanguageAdapter().defaultCode });
           }}
         >
-          <div className="mr-3">
+          <div className="mr-3 text-muted-foreground">
             <MarkdownIcon />
           </div>
           Markdown cell
@@ -86,10 +88,10 @@ const CreateCellButtonContextMenu = (props: {
           key="sql"
           onSelect={(evt) => {
             evt.stopPropagation();
-            onClick({ code: new SQLLanguageAdapter().defaultCode });
+            onClick({ code: new SQLLanguageAdapter().getDefaultCode() });
           }}
         >
-          <div className="mr-3">
+          <div className="mr-3 text-muted-foreground">
             <DatabaseIcon size={13} strokeWidth={1.5} />
           </div>
           SQL cell

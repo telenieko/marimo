@@ -14,18 +14,24 @@ import sys
 import threading
 import time
 import traceback
-from copy import copy
+from copy import copy, deepcopy
 from multiprocessing import connection
-from typing import TYPE_CHECKING, Any, Callable, Iterator, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Iterator, List, Optional, cast
 from uuid import uuid4
 
 from marimo import _loggers
 from marimo._ast.cell import CellConfig, CellId_t, CellImpl
 from marimo._ast.compiler import compile_cell
-from marimo._ast.visitor import ImportData, Name
+from marimo._ast.visitor import ImportData, Name, VariableData
 from marimo._config.config import ExecutionType, MarimoConfig, OnCellChangeType
-from marimo._data.preview_column import get_column_preview
+from marimo._config.settings import GLOBAL_SETTINGS
+from marimo._data.preview_column import (
+    get_column_preview_dataframe,
+    get_column_preview_for_sql,
+)
+from marimo._dependencies.dependencies import DependencyManager
 from marimo._messaging.cell_output import CellChannel
+from marimo._messaging.context import http_request_context, run_id_context
 from marimo._messaging.errors import (
     Error,
     MarimoInterruptionError,
@@ -34,7 +40,6 @@ from marimo._messaging.errors import (
     UnknownError,
 )
 from marimo._messaging.ops import (
-    Alert,
     CellOp,
     CompletedRun,
     DataColumnPreview,
@@ -49,7 +54,9 @@ from marimo._messaging.ops import (
     VariableValue,
     VariableValues,
 )
+from marimo._messaging.print_override import print_override
 from marimo._messaging.streams import (
+    QueuePipe,
     ThreadSafeStderr,
     ThreadSafeStdin,
     ThreadSafeStdout,
@@ -67,13 +74,17 @@ from marimo._output.rich_help import mddoc
 from marimo._plugins.core.web_component import JSONType
 from marimo._plugins.ui._core.ui_element import MarimoConvertValueException
 from marimo._runtime import dataflow, handlers, marimo_pdb, patches
-from marimo._runtime.complete import complete, completion_worker
+from marimo._runtime.app_meta import AppMeta
 from marimo._runtime.context import (
     ContextNotInitializedError,
     ExecutionContext,
     get_context,
 )
-from marimo._runtime.context.kernel_context import initialize_kernel_context
+from marimo._runtime.context.kernel_context import (
+    KernelRuntimeContext,
+    initialize_kernel_context,
+)
+from marimo._runtime.context.types import teardown_context
 from marimo._runtime.control_flow import MarimoInterrupt
 from marimo._runtime.input_override import input_override
 from marimo._runtime.packages.module_registry import ModuleRegistry
@@ -121,6 +132,7 @@ from marimo._runtime.utils.set_ui_element_request_manager import (
 )
 from marimo._runtime.validate_graph import check_for_errors
 from marimo._runtime.win32_interrupt_handler import Win32InterruptHandler
+from marimo._server.model import SessionMode
 from marimo._server.types import QueueType
 from marimo._tracer import kernel_tracer
 from marimo._utils.assert_never import assert_never
@@ -130,7 +142,8 @@ from marimo._utils.typed_connection import TypedConnection
 from marimo._utils.variables import is_local
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    import queue
+    from collections.abc import Sequence
     from types import ModuleType
 
     from marimo._plugins.ui._core.ui_element import UIElement
@@ -142,9 +155,8 @@ LOGGER = _loggers.marimo_logger()
 def defs() -> tuple[str, ...]:
     """Get the definitions of the currently executing cell.
 
-    **Returns**:
-
-    - tuple of the currently executing cell's defs.
+    Returns:
+        tuple[str, ...]: A tuple of the currently executing cell's defs.
     """
     try:
         ctx = get_context()
@@ -165,9 +177,8 @@ def defs() -> tuple[str, ...]:
 def refs() -> tuple[str, ...]:
     """Get the references of the currently executing cell.
 
-    **Returns**:
-
-    - tuple of the currently executing cell's refs.
+    Returns:
+        tuple[str, ...]: A tuple of the currently executing cell's refs.
     """
     try:
         ctx = get_context()
@@ -195,50 +206,87 @@ def refs() -> tuple[str, ...]:
 def query_params() -> QueryParams:
     """Get the query parameters of a marimo app.
 
-    **Examples**:
+    Examples:
+        Keep the text input in sync with the URL query parameters:
 
-    Keep the text input in sync with the URL query parameters.
+        ```python3
+        # In it's own cell
+        query_params = mo.query_params()
 
-    ```python3
-    # In it's own cell
-    query_params = mo.query_params()
+        # In another cell
+        search = mo.ui.text(
+            value=query_params["search"] or "",
+            on_change=lambda value: query_params.set("search", value),
+        )
+        search
+        ```
 
-    # In another cell
-    search = mo.ui.text(
-        value=query_params["search"] or "",
-        on_change=lambda value: query_params.set("search", value),
-    )
-    search
-    ```
+        You can also set the query parameters reactively:
 
-    You can also set the query parameters reactively:
+        ```python3
+        toggle = mo.ui.switch(label="Toggle me")
+        toggle
 
-    ```python3
-    toggle = mo.ui.switch(label="Toggle me")
-    toggle
+        # In another cell
+        query_params["is_enabled"] = toggle.value
+        ```
 
-    # In another cell
-    query_params["is_enabled"] = toggle.value
-    ```
-
-    **Returns**:
-
-    - A `QueryParams` object containing the query parameters.
-      You can directly interact with this object like a dictionary.
-      If you mutate this object, changes will be persisted to the frontend
-      query parameters and any other cells referencing the query parameters
-      will automatically re-run.
+    Returns:
+        QueryParams: A QueryParams object containing the query parameters.
+            You can directly interact with this object like a dictionary.
+            If you mutate this object, changes will be persisted to the frontend
+            query parameters and any other cells referencing the query parameters
+            will automatically re-run.
     """
     return get_context().query_params
+
+
+@mddoc
+def app_meta() -> AppMeta:
+    """Get the metadata of a marimo app.
+
+    The `AppMeta` class provides access to runtime metadata about a marimo app,
+    such as its display theme and execution mode.
+
+    Examples:
+        Get the current theme and conditionally set a plotting library's theme:
+
+        ```python
+        import altair as alt
+
+        # Enable dark theme for Altair when marimo is in dark mode
+        alt.themes.enable(
+            "dark" if mo.app_meta().theme == "dark" else "default"
+        )
+        ```
+
+        Show content only in edit mode:
+
+        ```python
+        # Only show this content when editing the notebook
+        mo.md("# Developer Notes") if mo.app_meta().mode == "edit" else None
+        ```
+
+        Get the current request headers or user info:
+
+        ```python
+        request = mo.app_meta().request
+        print(request.headers)
+        print(request.user)
+        ```
+
+    Returns:
+        AppMeta: An AppMeta object containing the app's metadata.
+    """
+    return AppMeta()
 
 
 @mddoc
 def cli_args() -> CLIArgs:
     """Get the command line arguments of a marimo notebook.
 
-        **Examples**:
-
-    `marimo edit notebook.py -- -size 10`
+    Examples:
+        `marimo edit notebook.py -- -size 10`
 
         ```python3
         # Access the command line arguments
@@ -248,21 +296,106 @@ def cli_args() -> CLIArgs:
             print(i)
         ```
 
-        **Returns**:
-
-        - A dictionary containing the command line arguments.
-          This dictionary is read-only and cannot be mutated.
+    Returns:
+        CLIArgs: A dictionary containing the command line arguments.
+            This dictionary is read-only and cannot be mutated.
     """
     return get_context().cli_args
 
 
+@mddoc
+def notebook_dir() -> pathlib.Path | None:
+    """Get the directory of the currently executing notebook.
+
+    Returns:
+        pathlib.Path | None: A pathlib.Path object representing the directory of the current
+            notebook, or None if the notebook's directory cannot be determined.
+
+    Examples:
+        ```python
+        data_file = mo.notebook_dir() / "data" / "example.csv"
+        # Use the directory to read a file
+        if data_file.exists():
+            print(f"Found data file: {data_file}")
+        else:
+            print("No data file found")
+        ```
+    """
+    try:
+        ctx = get_context()
+    except ContextNotInitializedError:
+        return None
+
+    filename = ctx.filename
+    if filename is not None:
+        return pathlib.Path(filename).parent.absolute()
+    return None
+
+
+class URLPath(pathlib.PurePosixPath):
+    """
+    Wrapper around pathlib.Path that preserves the "://" in the URL protocol.
+    """
+
+    def __str__(self) -> str:
+        return super().__str__().replace(":/", "://")
+
+
+@mddoc
+def notebook_location() -> pathlib.PurePath | None:
+    """Get the location of the currently executing notebook.
+
+    In WASM, this is the URL of webpage, for example, `https://my-site.com`.
+    For nested paths, this is the URL including the origin and pathname.
+    `https://<my-org>.github.io/<my-repo>/folder`.
+
+    In non-WASM, this is the directory of the notebook, which is the same as
+    `mo.notebook_dir()`.
+
+    Examples:
+        In order to access data both locally and when a notebook runs via
+        WebAssembly (e.g. hosted on GitHub Pages), you can use this
+        approach to fetch data from the notebook's location.
+
+        ```python
+        import polars as pl
+
+        data_path = mo.notebook_location() / "public" / "data.csv"
+        df = pl.read_csv(str(data_path))
+        df.head()
+        ```
+
+    Returns:
+        Path | None: A Path object representing the URL or directory of the current
+            notebook, or None if the notebook's directory cannot be determined.
+    """
+    if is_pyodide():
+        from js import location  # type: ignore
+
+        path_location = pathlib.Path(str(location))
+        # The location looks like https://marimo-team.github.io/marimo-gh-pages-template/notebooks/assets/worker-BxJ8HeOy.js
+        # We want to crawl out of the assets/ folder
+        if "assets" in path_location.parts:
+            return URLPath(str(path_location.parent.parent))
+        return URLPath(str(path_location))
+
+    else:
+        nb_dir = notebook_dir()
+        if nb_dir is not None:
+            return nb_dir
+        return None
+
+
 @dataclasses.dataclass
 class CellMetadata:
-    """CellMetadata
+    """CellMetadata class for storing cell metadata.
 
     Metadata the kernel needs to persist, even when a cell is removed
     from the graph or when a cell can't be formed from user code due to syntax
     errors.
+
+    Attributes:
+        config (CellConfig): Configuration for the cell.
     """
 
     config: CellConfig = dataclasses.field(default_factory=CellConfig)
@@ -272,20 +405,21 @@ class Kernel:
     """Kernel that manages the dependency graph and its execution.
 
     Args:
-    - cell_configs: initial configuration for each cell
-    - app_metadata: metadata about the notebook
-    - user_config: the initial user configuration
-    - stream: object used to communicate with the server/outside world
-    - stdout: replacement for sys.stdout
-    - stderr: replacement for sys.stderr
-    - stdin: replacement for sys.stdin
-    - module: module in which to execute code
-    - enqueue_control_request: callback to enqueue control requests
-    - debugger_override: a replacement for the built-in Pdb
+        cell_configs (dict[CellId_t, CellConfig]): Initial configuration for each cell.
+        app_metadata (AppMetadata): Metadata about the notebook.
+        user_config (MarimoConfig): The initial user configuration.
+        stream (Stream): Object used to communicate with the server/outside world.
+        stdout (Stdout | None): Replacement for sys.stdout.
+        stderr (Stderr | None): Replacement for sys.stderr.
+        stdin (Stdin | None): Replacement for sys.stdin.
+        module (ModuleType): Module in which to execute code.
+        enqueue_control_request (Callable[[ControlRequest], None]): Callback to enqueue control requests.
+        debugger_override (marimo_pdb.MarimoPdb | None): A replacement for the built-in Pdb.
     """
 
     def __init__(
         self,
+        *,
         cell_configs: dict[CellId_t, CellConfig],
         app_metadata: AppMetadata,
         user_config: MarimoConfig,
@@ -363,6 +497,12 @@ class Kernel:
             sys.path.insert(0, "")
 
         self.graph = dataflow.DirectedGraph()
+        # When autorun on startup is disabled, this holds cells that have
+        # not yet been run; these cells are removed when they or their
+        # descendants are run
+        self._uninstantiated_execution_requests: dict[
+            CellId_t, ExecutionRequest
+        ] = {}
         self.cell_metadata: dict[CellId_t, CellMetadata] = {
             cell_id: CellMetadata(config=config)
             for cell_id, config in cell_configs.items()
@@ -384,8 +524,6 @@ class Kernel:
         ).get("execution_type", "relaxed")
         self._update_runtime_from_user_config(user_config)
 
-        # Set up the execution context
-        self.execution_context: Optional[ExecutionContext] = None
         # initializers to override construction of ui elements
         self.ui_initializers: dict[str, Any] = {}
         # errored cells
@@ -398,6 +536,25 @@ class Kernel:
             patches.patch_micropip(self.globals)
         exec("import marimo as __marimo__", self.globals)
 
+    def teardown(self) -> None:
+        """Teardown resources owned by the kernel."""
+        if self.stdout is not None:
+            self.stdout.stop()
+        if self.stderr is not None:
+            self.stderr.stop()
+        if self.stdin is not None:
+            self.stdin.stop()
+        self.stream.stop()
+
+        if self.module_watcher is not None:
+            self.module_watcher.stop()
+
+        # TODO(akshayka): There's a memory leak in run mode, with memory
+        # usage increasing with each session creation. Somehow the kernel
+        # globals appear to leak, even though the thread exits. As a hack we
+        # manually clear kernel memory.
+        self._module.__dict__.clear()
+
     def lazy(self) -> bool:
         return self.reactive_execution_mode == "lazy"
 
@@ -405,16 +562,20 @@ class Kernel:
         return self.enqueue_control_request(ExecuteStaleRequest())
 
     def _execute_install_missing_packages_callback(
-        self, package_manager: str
+        self, package_manager: str, packages: list[str]
     ) -> None:
+        version = {pkg: "" for pkg in packages}
         return self.enqueue_control_request(
-            InstallMissingPackagesRequest(manager=package_manager)
+            InstallMissingPackagesRequest(
+                manager=package_manager, versions=version
+            )
         )
 
     def _update_runtime_from_user_config(self, config: MarimoConfig) -> None:
         package_manager = config["package_management"]["manager"]
         autoreload_mode = config["runtime"]["auto_reload"]
         self.reactive_execution_mode = config["runtime"]["on_cell_change"]
+        self.user_config = config
 
         if (
             self.package_manager is None
@@ -422,7 +583,18 @@ class Kernel:
         ):
             self.package_manager = create_package_manager(package_manager)
 
-        if autoreload_mode == "lazy" or autoreload_mode == "autorun":
+            if self._should_update_script_metadata():
+                # All marimo notebooks depend on the marimo package; if the
+                # notebook already has marimo as a dependency, or an optional
+                # dependency group with marimo, such as marimo[sql], this is a
+                # NOOP.
+                self._update_script_metadata(["marimo"])
+
+        if (
+            (autoreload_mode == "lazy" or autoreload_mode == "autorun")
+            # Pyodide doesn't support hot module reloading
+            and not is_pyodide()
+        ):
             if self.module_reloader is None:
                 self.module_reloader = ModuleReloader()
 
@@ -447,8 +619,6 @@ class Kernel:
                 self.module_watcher.stop()
                 self.module_watcher = None
 
-        self.user_config = config
-
     @property
     def globals(self) -> dict[Any, Any]:
         return self._module.__dict__
@@ -468,6 +638,8 @@ class Kernel:
         self, completion_queue: QueueType[CodeCompletionRequest]
     ) -> None:
         """Must be called after context is initialized"""
+        from marimo._runtime.complete import completion_worker
+
         threading.Thread(
             target=completion_worker,
             args=(
@@ -485,6 +657,8 @@ class Kernel:
     def code_completion(
         self, request: CodeCompletionRequest, docstrings_limit: int
     ) -> None:
+        from marimo._runtime.complete import complete
+
         complete(
             request,
             self.graph,
@@ -498,15 +672,20 @@ class Kernel:
     def _install_execution_context(
         self, cell_id: CellId_t, setting_element_value: bool = False
     ) -> Iterator[ExecutionContext]:
-        self.execution_context = ExecutionContext(
-            cell_id, setting_element_value
+        ctx = get_context()
+        assert isinstance(ctx, KernelRuntimeContext)
+        ctx.execution_context = (
+            exec_ctx := ExecutionContext(cell_id, setting_element_value)
         )
-        with get_context().provide_ui_ids(str(cell_id)), redirect_streams(
-            cell_id,
-            stream=self.stream,
-            stdout=self.stdout,
-            stderr=self.stderr,
-            stdin=self.stdin,
+        with (
+            get_context().provide_ui_ids(str(cell_id)),
+            redirect_streams(
+                cell_id,
+                stream=self.stream,
+                stdout=self.stdout,
+                stderr=self.stderr,
+                stdin=self.stdin,
+            ),
         ):
             modules = None
             try:
@@ -516,9 +695,9 @@ class Kernel:
                     self.module_reloader.check(
                         modules=sys.modules, reload=True
                     )
-                yield self.execution_context
+                yield exec_ctx
             finally:
-                self.execution_context = None
+                ctx.execution_context = None
                 if self.module_reloader is not None and modules is not None:
                     # Note timestamps for newly loaded modules
                     new_modules = set(sys.modules) - modules
@@ -635,9 +814,34 @@ class Kernel:
             if previous_cell is not None:
                 LOGGER.debug("Deleting cell %s", cell_id)
                 previous_children = self._deactivate_cell(cell_id)
+
             error = self._try_registering_cell(
                 cell_id, code, carried_imports=carried_imports
             )
+            if error is not None and previous_cell is not None:
+                # The frontend keeps the cell around in the case of a
+                # registration error; let the FE know the cell is no longer
+                # stale.
+                previous_cell.set_stale(False)
+
+            # For any newly imported namespaces, add them to the metadata
+            #
+            # TODO(akshayka): Consider using the module watcher to discover
+            # packages used by a notebook; that would have the benefit of
+            # discovering transitive dependencies, ie if a notebook used a
+            # local module that in turn used packages available on PyPI.
+            if self._should_update_script_metadata():
+                cell = self.graph.cells.get(cell_id, None)
+                if cell:
+                    prev_imports: set[Name] = (
+                        set([im.namespace for im in previous_cell.imports])
+                        if previous_cell
+                        else set()
+                    )
+                    to_add = cell.imported_namespaces - prev_imports
+                    self._update_script_metadata(
+                        import_namespaces_to_add=list(to_add)
+                    )
 
         LOGGER.debug(
             "graph:\n\tcell id %s\n\tparents %s\n\tchildren %s\n\tsiblings %s",
@@ -653,22 +857,53 @@ class Kernel:
         children = self.graph.children.get(cell_id, set())
         return previous_children - children, error
 
-    def _delete_names(
-        self, names: Iterable[Name], exclude_defs: set[Name]
+    def _delete_variables(
+        self,
+        variables: dict[Name, list[VariableData]],
+        exclude_defs: set[Name],
     ) -> None:
         """Delete `names` from kernel, except for `exclude_defs`"""
-        for name in names:
+        for name, variable_data in variables.items():
+            # Take the last definition of the variable
+            variable = variable_data[-1]
             if name in exclude_defs:
                 continue
 
-            if name in self.globals:
-                del self.globals[name]
+            if variable.kind == "table" and DependencyManager.duckdb.has():
+                import duckdb
 
-            if (
-                "__annotations__" in self.globals
-                and name in self.globals["__annotations__"]
-            ):
-                del self.globals["__annotations__"][name]
+                # We only drop in-memory tables: we don't want to drop tables
+                # on databases!
+                try:
+                    duckdb.execute(f"DROP TABLE IF EXISTS memory.main.{name}")
+                except Exception as e:
+                    LOGGER.warning("Failed to drop table %s: %s", name, str(e))
+            elif variable.kind == "view" and DependencyManager.duckdb.has():
+                import duckdb
+
+                # We only drop in-memory views for the same reason.
+                try:
+                    duckdb.execute(f"DROP VIEW IF EXISTS memory.main.{name}")
+                except Exception as e:
+                    LOGGER.warning("Failed to drop view %s: %s", name, str(e))
+            elif variable.kind == "catalog" and DependencyManager.duckdb.has():
+                import duckdb
+
+                try:
+                    duckdb.execute(f"DETACH DATABASE IF EXISTS {name}")
+                except Exception as e:
+                    LOGGER.warning(
+                        "Failed to detach catalog %s: %s", name, str(e)
+                    )
+            else:
+                if name in self.globals:
+                    del self.globals[name]
+
+                if (
+                    "__annotations__" in self.globals
+                    and name in self.globals["__annotations__"]
+                ):
+                    del self.globals["__annotations__"][name]
 
     def _invalidate_cell_state(
         self,
@@ -687,9 +922,13 @@ class Kernel:
         missing_modules_before_deletion = (
             self.module_registry.missing_modules()
         )
-        defs_to_delete = cell.defs
-        self._delete_names(
-            defs_to_delete, exclude_defs if exclude_defs is not None else set()
+
+        temporaries = {
+            name: [VariableData(kind="variable")] for name in cell.temporaries
+        }
+        self._delete_variables(
+            {**cell.variable_data, **temporaries},
+            exclude_defs if exclude_defs is not None else set(),
         )
 
         missing_modules_after_deletion = (
@@ -700,26 +939,20 @@ class Kernel:
             and missing_modules_after_deletion
             != missing_modules_before_deletion
         ):
-            if self.package_manager.should_auto_install():
-                self._execute_install_missing_packages_callback(
-                    self.package_manager.name
+            packages = list(
+                sorted(
+                    pkg
+                    for mod in missing_modules_after_deletion
+                    if not self.package_manager.attempted_to_install(
+                        pkg := self.package_manager.module_to_package(mod)
+                    )
                 )
-            else:
-                # Deleting a cell can make the set of missing packages smaller
-                MissingPackageAlert(
-                    packages=list(
-                        sorted(
-                            pkg
-                            for mod in missing_modules_after_deletion
-                            if not self.package_manager.attempted_to_install(
-                                pkg := self.package_manager.module_to_package(
-                                    mod
-                                )
-                            )
-                        )
-                    ),
-                    isolated=is_python_isolated(),
-                ).broadcast()
+            )
+            # Deleting a cell can make the set of missing packages smaller
+            MissingPackageAlert(
+                packages=packages,
+                isolated=is_python_isolated(),
+            ).broadcast()
 
         cell.set_output(None)
         get_context().cell_lifecycle_registry.dispose(
@@ -762,6 +995,11 @@ class Kernel:
         del self.cell_metadata[cell_id]
         cell = self.graph.cells[cell_id]
         cell.import_workspace.imported_defs = set()
+        if self._should_update_script_metadata():
+            self._update_script_metadata(
+                import_namespaces_to_add=[],
+            )
+
         return self._deactivate_cell(cell_id)
 
     def mutate_graph(
@@ -784,13 +1022,15 @@ class Kernel:
         absent-mindedly redefine an existing name when creating a new cell:
         such a mistake shouldn't invalidate the program state.
 
-        Returns
+        Returns:
         - set of cells that must be run to return kernel to consistent state
         """
         LOGGER.debug("Mutating graph.")
         LOGGER.debug("Current set of errors: %s", self.errors)
         cells_before_mutation = set(self.graph.cells.keys())
         cells_with_errors_before_mutation = set(self.errors.keys())
+        edges_before = deepcopy(self.graph.children)
+        definitions_before = set(self.graph.definitions.keys())
 
         # The set of cells that were successfully registered
         registered_cell_ids: set[CellId_t] = set()
@@ -921,33 +1161,50 @@ class Kernel:
 
         self.errors = all_errors
         for cid in self.errors:
+            cell = self.graph.cells[cid] if cid in self.graph.cells else None
             if (
-                # Cells with syntax errors are not in the graph
-                cid in self.graph.cells
-                and not self.graph.cells[cid].config.disabled
+                cell is not None
+                and not cell.config.disabled
                 and self.graph.is_disabled(cid)
             ):
                 # this may be the first time we're seeing the cell: set its
                 # status
-                self.graph.cells[cid].set_runtime_state(
-                    "disabled-transitively"
-                )
+                cell.set_runtime_state("disabled-transitively")
+
+            # The error is up-to-date, since we just processed the graph
+            if cell is not None:
+                cell.set_stale(False)
+            else:
+                # On syntax errors, we don't have a cell object.
+                CellOp.broadcast_stale(cell_id=cid, stale=False)
+
             CellOp.broadcast_error(
                 data=self.errors[cid],
                 clear_console=True,
                 cell_id=cid,
             )
 
-        Variables(
-            variables=[
-                VariableDeclaration(
-                    name=variable,
-                    declared_by=list(declared_by),
-                    used_by=list(self.graph.get_referring_cells(variable)),
-                )
-                for variable, declared_by in self.graph.definitions.items()
-            ]
-        ).broadcast()
+        # Only broadcast Variables message if definitions changed
+        edges_after = self.graph.children
+        definitions_after = set(self.graph.definitions.keys())
+        if (
+            edges_before != edges_after
+            or definitions_before != definitions_after
+        ):
+            Variables(
+                variables=[
+                    VariableDeclaration(
+                        name=variable,
+                        declared_by=list(declared_by),
+                        used_by=list(
+                            self.graph.get_referring_cells(
+                                variable, language="python"
+                            )
+                        ),
+                    )
+                    for variable, declared_by in self.graph.definitions.items()
+                ]
+            ).broadcast()
 
         stale_cells = (
             set(
@@ -959,7 +1216,8 @@ class Kernel:
                             for cid in cells_transitioned_to_error
                             if cid in self.graph.children
                         ]
-                    ),
+                    )
+                    - cells_with_errors_after_mutation,
                     cells_that_no_longer_have_errors,
                 )
             )
@@ -975,18 +1233,19 @@ class Kernel:
     async def _run_cells(self, cell_ids: set[CellId_t]) -> None:
         """Run cells and any state updates they trigger"""
 
-        # This patch is an attempt to mitigate problems caused by the fact
-        # that in run mode, kernels run in threads and share the same
-        # sys.modules. Races can still happen, but this should help in most
-        # common cases. We could also be more aggressive and run this before
-        # every cell, or even before pickle.dump/pickle.dumps()
-        with patches.patch_main_module_context(self._module):
-            while cell_ids := await self._run_cells_internal(cell_ids):
-                LOGGER.debug("Running state updates ...")
-                if self.lazy() and cell_ids:
-                    self.graph.set_stale(cell_ids, prune_imports=True)
-                    break
-            LOGGER.debug("Finished run.")
+        with run_id_context():
+            # This patch is an attempt to mitigate problems caused by the fact
+            # that in run mode, kernels run in threads and share the same
+            # sys.modules. Races can still happen, but this should help in most
+            # common cases. We could also be more aggressive and run this before
+            # every cell, or even before pickle.dump/pickle.dumps()
+            with patches.patch_main_module_context(self._module):
+                while cell_ids := await self._run_cells_internal(cell_ids):
+                    LOGGER.debug("Running state updates ...")
+                    if self.lazy() and cell_ids:
+                        self.graph.set_stale(cell_ids, prune_imports=True)
+                        break
+                LOGGER.debug("Finished run.")
 
     async def _if_autorun_then_run_cells(
         self, cell_ids: set[CellId_t]
@@ -999,16 +1258,23 @@ class Kernel:
             self.graph.set_stale(cell_ids, prune_imports=True)
 
     def _broadcast_missing_packages(self, runner: cell_runner.Runner) -> None:
+        module_not_found_errors = [
+            e
+            for e in runner.exceptions.values()
+            if isinstance(e, ModuleNotFoundError)
+        ]
         if (
-            any(
-                isinstance(e, ModuleNotFoundError)
-                for e in runner.exceptions.values()
-            )
+            len(module_not_found_errors) > 0
             and self.package_manager is not None
         ):
+            # Grab missing modules from module registry and from module not found errors
+            missing_modules = self.module_registry.missing_modules() | set(
+                e.name for e in module_not_found_errors if e.name is not None
+            )
+
             missing_packages = [
                 pkg
-                for mod in self.module_registry.missing_modules()
+                for mod in missing_modules
                 # filter out packages that we already attempted to install
                 # to prevent an infinite loop
                 if not self.package_manager.attempted_to_install(
@@ -1017,13 +1283,14 @@ class Kernel:
             ]
 
             if missing_packages:
+                packages = list(sorted(missing_packages))
                 if self.package_manager.should_auto_install():
                     self._execute_install_missing_packages_callback(
-                        self.package_manager.name
+                        self.package_manager.name, packages
                     )
                 else:
                     MissingPackageAlert(
-                        packages=list(sorted(missing_packages)),
+                        packages=packages,
                         isolated=is_python_isolated(),
                     ).broadcast()
 
@@ -1102,8 +1369,9 @@ class Kernel:
         Should be called when a state's setter is called.
         """
         # store the state and the currently executing cell
-        assert self.execution_context is not None
-        self.state_updates[state] = self.execution_context.cell_id
+        ctx = get_context()
+        assert ctx.execution_context is not None
+        self.state_updates[state] = ctx.execution_context.cell_id
         # TODO(akshayka): Send VariableValues message for any globals
         # bound to this state object (just like UI elements)
 
@@ -1111,6 +1379,9 @@ class Kernel:
     async def delete_cell(self, request: DeleteCellRequest) -> None:
         """Delete a cell from kernel and graph."""
         cell_id = request.cell_id
+        if cell_id in self._uninstantiated_execution_requests:
+            del self._uninstantiated_execution_requests[cell_id]
+
         if cell_id in self.graph.cells:
             await self._run_cells(
                 self.mutate_graph(
@@ -1127,16 +1398,77 @@ class Kernel:
 
         The cells may be cells already existing in the graph or new cells.
         Adds the cells in `execution_requests` to the graph before running
-        them.
+        them. If the cells have uninstantiated ancestors, these are also run,
+        allowing frontends to incrementally instantiate a notebook.
 
         Cells may use top-level await, which is why this function is async.
         """
+
+        async def _run_with_uninstantiated_requests(
+            execution_requests: Sequence[ExecutionRequest],
+        ) -> None:
+            if not self._uninstantiated_execution_requests:
+                await self._run_cells(
+                    self.mutate_graph(execution_requests, deletion_requests=[])
+                )
+                return
+
+            execution_requests_cell_ids = {
+                er.cell_id for er in execution_requests
+            }
+            graph = dataflow.DirectedGraph()
+            for cid, er in list(
+                self._uninstantiated_execution_requests.items()
+            ):
+                if cid in execution_requests_cell_ids:
+                    # Running a previously uninstantiated cell; just remove
+                    # it from our cache of uninstantiated execution requests.
+                    del self._uninstantiated_execution_requests[cid]
+                    continue
+
+                try:
+                    cell = compile_cell(er.code, cell_id=er.cell_id)
+                except Exception:
+                    # The cell was not parsable.
+                    continue
+                graph.register_cell(cell_id=cid, cell=cell)
+
+            # Collect uninstantiated ancestors
+            ancestors: set[CellId_t] = set()
+            for er in execution_requests:
+                try:
+                    cell = compile_cell(er.code, cell_id=er.cell_id)
+                except Exception:
+                    continue
+                graph.register_cell(cell_id=er.cell_id, cell=cell)
+                ancestors |= graph.ancestors(er.cell_id)
+
+            # We run all uninstantiated ancestors of the requested cells
+            previously_uninstantiated_requests: list[ExecutionRequest] = []
+            for ancestor_cid in ancestors:
+                if ancestor_cid in self._uninstantiated_execution_requests:
+                    previously_uninstantiated_requests.append(
+                        self._uninstantiated_execution_requests[ancestor_cid]
+                    )
+                    del self._uninstantiated_execution_requests[ancestor_cid]
+
+            await self._run_cells(
+                self.mutate_graph(
+                    list(execution_requests)
+                    + previously_uninstantiated_requests,
+                    deletion_requests=[],
+                )
+            )
+
+        if self.last_interrupt_timestamp is None:
+            # No interruption has occurred, so we can run all requests
+            await _run_with_uninstantiated_requests(execution_requests)
+            return
+
+        # Filter out requests that were created before the last interruption
         filtered_requests: list[ExecutionRequest] = []
         for request in execution_requests:
-            if (
-                self.last_interrupt_timestamp is not None
-                and request.timestamp < self.last_interrupt_timestamp
-            ):
+            if request.timestamp < self.last_interrupt_timestamp:
                 CellOp.broadcast_error(
                     data=[MarimoInterruptionError()],
                     clear_console=False,
@@ -1157,13 +1489,12 @@ class Kernel:
             else:
                 filtered_requests.append(request)
 
-        await self._run_cells(
-            self.mutate_graph(filtered_requests, deletion_requests=[])
-        )
+        await _run_with_uninstantiated_requests(filtered_requests)
 
     @kernel_tracer.start_as_current_span("rename_file")
     async def rename_file(self, filename: str) -> None:
         self.globals["__file__"] = filename
+        self.app_metadata.filename = filename
         roots = set()
         for cell in self.graph.cells.values():
             if "__file__" in cell.refs:
@@ -1214,9 +1545,18 @@ class Kernel:
     @kernel_tracer.start_as_current_span("run_stale_cells")
     async def run_stale_cells(self) -> None:
         cells_to_run: set[CellId_t] = set()
+        if self._uninstantiated_execution_requests:
+            cells_to_run |= set(self._uninstantiated_execution_requests.keys())
+            self.mutate_graph(
+                list(self._uninstantiated_execution_requests.values()),
+                deletion_requests=[],
+            )
+            self._uninstantiated_execution_requests = {}
+
         for cid, cell_impl in self.graph.cells.items():
             if cell_impl.stale and not self.graph.is_disabled(cid):
                 cells_to_run.add(cid)
+
         await self._run_cells(
             dataflow.transitive_closure(
                 self.graph,
@@ -1288,7 +1628,9 @@ class Kernel:
                         child_context.app is not None
                         and await child_context.app.set_ui_element_value(
                             SetUIElementValueRequest(
-                                object_ids=[object_id], values=[value]
+                                object_ids=[object_id],
+                                values=[value],
+                                request=request.request,
                             )
                         )
                     ):
@@ -1300,7 +1642,9 @@ class Kernel:
                         ]
                         for binding in bindings:
                             referring_cells.update(
-                                self.graph.get_referring_cells(binding)
+                                self.graph.get_referring_cells(
+                                    binding, language="python"
+                                )
                             )
 
                 # KeyError: Trying to access an unnamed UIElement
@@ -1376,7 +1720,7 @@ class Kernel:
                     # subtracting self.graph.definitions[name]: never rerun the
                     # cell that created the name
                     referring_cells.update(
-                        self.graph.get_referring_cells(name)
+                        self.graph.get_referring_cells(name, language="python")
                         - self.graph.get_defining_cells(name)
                     )
                 except Exception:
@@ -1427,21 +1771,18 @@ class Kernel:
         return bool(updated_components) or bool(referring_cells)
 
     def get_ui_initial_value(self, object_id: str) -> Any:
-        """Get an initial value for a UIElement, if any
+        """Get an initial value for a UIElement, if any.
 
-        Initial values are optionally populated during instantiation
+        Initial values are optionally populated during instantiation.
 
         Args:
-        ----
-        object_id: ID of UIElement
+            object_id (str): ID of UIElement.
 
         Returns:
-        -------
-        initial value of UI element, if any
+            Any: Initial value of UI element, if any.
 
         Raises:
-        ------
-        KeyError if object_id not found
+            KeyError: If object_id not found.
         """
         return self.ui_initializers[object_id]
 
@@ -1455,8 +1796,15 @@ class Kernel:
         """Execute a function call.
 
         If the function is not found, children contexts are also searched.
-        Returns a status, payload, and a bool which is True if the function was
-        found, False otherwise.
+
+        Args:
+            request (FunctionCallRequest): The function call request.
+
+        Returns:
+            tuple[HumanReadableStatus, JSONType, bool]: A tuple containing:
+                - status: Human readable status of the function call
+                - payload: The function return value
+                - found: True if the function was found, False otherwise
         """
         ctx = get_context()
         function = ctx.function_registry.get_function(
@@ -1493,9 +1841,10 @@ class Kernel:
         else:
             found = True
             LOGGER.debug("Executing RPC %s", request)
-            with self._install_execution_context(
-                cell_id=function.cell_id
-            ), ctx.provide_ui_ids(str(uuid4())):
+            with (
+                self._install_execution_context(cell_id=function.cell_id),
+                ctx.provide_ui_ids(str(uuid4())),
+            ):
                 # Usually UI element IDs are deterministic, based on
                 # cell id, so that element values can be matched up
                 # with objects on notebook/app re-connection.
@@ -1552,7 +1901,7 @@ class Kernel:
         if self.graph.cells:
             del request
             LOGGER.debug("App already instantiated.")
-        else:
+        elif request.auto_run:
             self.reset_ui_initializers()
             for (
                 object_id,
@@ -1561,6 +1910,12 @@ class Kernel:
                 self.ui_initializers[object_id] = initial_value
             await self.run(request.execution_requests)
             self.reset_ui_initializers()
+        else:
+            self._uninstantiated_execution_requests = {
+                er.cell_id: er for er in request.execution_requests
+            }
+            for cid in self._uninstantiated_execution_requests:
+                CellOp.broadcast_stale(cell_id=cid, stale=True)
 
     async def install_missing_packages(
         self, request: InstallMissingPackagesRequest
@@ -1575,38 +1930,41 @@ class Kernel:
             self.package_manager = create_package_manager(request.manager)
 
         if not self.package_manager.is_manager_installed():
-            Alert(
-                title="Package manager not installed",
-                description=(
-                    f"{request.manager} is not available on your machine."
-                ),
-                variant="danger",
-            ).broadcast()
+            self.package_manager.alert_not_installed()
             return
 
-        # Package manager operates on module names
-        missing_modules = list(sorted(self.module_registry.missing_modules()))
+        missing_packages_set = set(request.versions.keys())
+        # Append all other missing packages from the notebook; the missing
+        # package request only contains the packages from the cell the user
+        # executed.
+        missing_packages_set.update(
+            [
+                self.package_manager.module_to_package(module)
+                for module in self.module_registry.missing_modules()
+            ]
+        )
+        missing_packages = list(sorted(missing_packages_set))
 
         # Frontend shows package names, not module names
         package_statuses: PackageStatusType = {
-            self.package_manager.module_to_package(mod): "queued"
-            for mod in missing_modules
+            pkg: "queued" for pkg in missing_packages
         }
         InstallingPackageAlert(packages=package_statuses).broadcast()
 
-        for mod in missing_modules:
-            pkg = self.package_manager.module_to_package(mod)
+        for pkg in missing_packages:
             if self.package_manager.attempted_to_install(package=pkg):
                 # Already attempted an installation; it must have failed.
                 # Skip the installation.
                 continue
             package_statuses[pkg] = "installing"
             InstallingPackageAlert(packages=package_statuses).broadcast()
-            if await self.package_manager.install(pkg):
+            version = request.versions.get(pkg)
+            if await self.package_manager.install(pkg, version=version):
                 package_statuses[pkg] = "installed"
                 InstallingPackageAlert(packages=package_statuses).broadcast()
             else:
                 package_statuses[pkg] = "failed"
+                mod = self.package_manager.package_to_module(pkg)
                 self.module_registry.excluded_modules.add(mod)
                 InstallingPackageAlert(packages=package_statuses).broadcast()
 
@@ -1615,6 +1973,12 @@ class Kernel:
             for pkg in package_statuses
             if package_statuses[pkg] == "installed"
         ]
+
+        # If a package was not installed at cell registration time, it won't
+        # yet be in the script metadata.
+        if self._should_update_script_metadata():
+            self._update_script_metadata(installed_modules)
+
         cells_to_run = set(
             cid
             for module in installed_modules
@@ -1623,6 +1987,34 @@ class Kernel:
         if cells_to_run:
             await self._if_autorun_then_run_cells(cells_to_run)
 
+    def _should_update_script_metadata(self) -> bool:
+        return (
+            GLOBAL_SETTINGS.MANAGE_SCRIPT_METADATA is True
+            and self.app_metadata.filename is not None
+            and self.package_manager is not None
+        )
+
+    def _update_script_metadata(
+        self, import_namespaces_to_add: List[str]
+    ) -> None:
+        filename = self.app_metadata.filename
+
+        if not filename or not self.package_manager:
+            return
+
+        try:
+            LOGGER.debug(
+                "Updating script metadata: %s. Adding namespaces: %s.",
+                filename,
+                import_namespaces_to_add,
+            )
+            self.package_manager.update_notebook_script_metadata(
+                filepath=filename,
+                import_namespaces_to_add=import_namespaces_to_add,
+            )
+        except Exception as e:
+            LOGGER.error("Failed to add script metadata to notebook: %s", e)
+
     @kernel_tracer.start_as_current_span("preview_dataset_column")
     async def preview_dataset_column(
         self, request: PreviewDatasetColumnRequest
@@ -1630,36 +2022,53 @@ class Kernel:
         """Preview a column of a dataset.
 
         The dataset is loaded, and the column is displayed in the frontend.
+
+        Args:
+            request (PreviewDatasetColumnRequest): The preview request containing:
+                - table_name: Name of the table
+                - column_name: Name of the column
+                - source_type: Type of data source ("duckdb" or "local")
         """
+        table_name = request.table_name
+        column_name = request.column_name
+        source_type = request.source_type
 
-        if request.source_type == "duckdb":
-            DataColumnPreview(
-                column_name=request.column_name,
-                table_name=request.table_name,
-            ).broadcast()
-            return
+        try:
+            if source_type == "duckdb":
+                column_preview = get_column_preview_for_sql(
+                    table_name=table_name,
+                    column_name=column_name,
+                )
+            elif source_type == "local":
+                dataset = self.globals[table_name]
+                column_preview = get_column_preview_dataframe(dataset, request)
+            elif source_type == "connection":
+                # TODO: Handle data-source-connection / engine display
+                pass
+            else:
+                assert_never(source_type)
 
-        if request.source_type == "local":
-            try:
-                dataset = self.globals[request.table_name]
-                column_preview = get_column_preview(dataset, request)
-                if column_preview is None:
-                    DataColumnPreview(
-                        error=f"Column {request.column_name} not found",
-                        column_name=request.column_name,
-                        table_name=request.table_name,
-                    ).broadcast()
-                else:
-                    column_preview.broadcast()
-            except Exception as e:
+            if column_preview is None:
                 DataColumnPreview(
-                    error=str(e),
-                    column_name=request.column_name,
-                    table_name=request.table_name,
+                    error=f"Column {column_name} not found",
+                    column_name=column_name,
+                    table_name=table_name,
                 ).broadcast()
-            return
-
-        assert_never(request.source_type)
+            else:
+                column_preview.broadcast()
+        except Exception as e:
+            LOGGER.warning(
+                "Failed to get preview for column %s in table %s",
+                column_name,
+                table_name,
+                exc_info=e,
+            )
+            DataColumnPreview(
+                error=str(e),
+                column_name=column_name,
+                table_name=table_name,
+            ).broadcast()
+        return
 
     async def handle_message(self, request: ControlRequest) -> None:
         """Handle a message from the client.
@@ -1674,13 +2083,16 @@ class Kernel:
         with self.lock_globals():
             LOGGER.debug("Handling control request: %s", request)
             if isinstance(request, CreationRequest):
-                await self.instantiate(request)
+                with http_request_context(request.request):
+                    await self.instantiate(request)
                 CompletedRun().broadcast()
             elif isinstance(request, ExecuteMultipleRequest):
-                await self.run(request.execution_requests)
+                with http_request_context(request.request):
+                    await self.run(request.execution_requests)
                 CompletedRun().broadcast()
             elif isinstance(request, ExecuteScratchpadRequest):
-                await self.run_scratchpad(request.code)
+                with http_request_context(request.request):
+                    await self.run_scratchpad(request.code)
             elif isinstance(request, ExecuteStaleRequest):
                 await self.run_stale_cells()
             elif isinstance(request, RenameRequest):
@@ -1690,7 +2102,8 @@ class Kernel:
             elif isinstance(request, SetUserConfigRequest):
                 self.set_user_config(request)
             elif isinstance(request, SetUIElementValueRequest):
-                await self.set_ui_element_value(request)
+                with http_request_context(request.request):
+                    await self.set_ui_element_value(request)
                 CompletedRun().broadcast()
             elif isinstance(request, FunctionCallRequest):
                 status, ret, _ = await self.function_call_request(request)
@@ -1720,7 +2133,8 @@ def launch_kernel(
     set_ui_element_queue: QueueType[SetUIElementValueRequest],
     completion_queue: QueueType[CodeCompletionRequest],
     input_queue: QueueType[str],
-    socket_addr: tuple[str, int],
+    stream_queue: queue.Queue[KernelMessage] | None,
+    socket_addr: tuple[str, int] | None,
     is_edit_mode: bool,
     configs: dict[CellId_t, CellConfig],
     app_metadata: AppMetadata,
@@ -1744,36 +2158,46 @@ def launch_kernel(
         profiler = cProfile.Profile()
         profiler.enable()
 
-    n_tries = 0
-    pipe: Optional[TypedConnection[KernelMessage]] = None
-    while n_tries < 100:
-        try:
-            pipe = TypedConnection[KernelMessage].of(
-                connection.Client(socket_addr)
-            )
-            break
-        except Exception:
-            n_tries += 1
-            time.sleep(0.01)
-
-    if n_tries == 100 or pipe is None:
-        LOGGER.debug("Failed to connect to socket.")
-        return
+    should_redirect_stdio = is_edit_mode or redirect_console_to_browser
 
     # Create communication channels
-    stream = ThreadSafeStream(pipe=pipe, input_queue=input_queue)
+    pipe: Optional[TypedConnection[KernelMessage]] = None
+    if socket_addr is not None:
+        n_tries = 0
+        while n_tries < 100:
+            try:
+                pipe = TypedConnection[KernelMessage].of(
+                    connection.Client(socket_addr)
+                )
+                break
+            except Exception:
+                n_tries += 1
+                time.sleep(0.01)
+
+        if n_tries == 100 or pipe is None:
+            LOGGER.debug("Failed to connect to socket.")
+            return
+
+        stream = ThreadSafeStream(
+            pipe=pipe,
+            input_queue=input_queue,
+            redirect_console=should_redirect_stdio,
+        )
+    elif stream_queue is not None:
+        stream = ThreadSafeStream(
+            pipe=QueuePipe(stream_queue),
+            input_queue=input_queue,
+            redirect_console=should_redirect_stdio,
+        )
+    else:
+        raise RuntimeError(
+            "One of queue_pipe and socket_addr must be non None"
+        )
+
     # Console output is hidden in run mode, so no need to redirect
     # (redirection of console outputs is not thread-safe anyway)
-    stdout = (
-        ThreadSafeStdout(stream)
-        if is_edit_mode or redirect_console_to_browser
-        else None
-    )
-    stderr = (
-        ThreadSafeStderr(stream)
-        if is_edit_mode or redirect_console_to_browser
-        else None
-    )
+    stdout = ThreadSafeStdout(stream) if should_redirect_stdio else None
+    stderr = ThreadSafeStderr(stream) if should_redirect_stdio else None
     # TODO(akshayka): stdin in run mode? input(prompt) uses stdout, which
     # isn't currently available in run mode.
     stdin = ThreadSafeStdin(stream) if is_edit_mode else None
@@ -1783,6 +2207,18 @@ def launch_kernel(
         else None
     )
 
+    # In run mode, the kernel should always be in autorun, and the module
+    # autoreloader is disabled
+    if not is_edit_mode:
+        user_config = user_config.copy()
+        user_config["runtime"]["on_cell_change"] = "autorun"
+        user_config["runtime"]["auto_reload"] = "off"
+
+    def _enqueue_control_request(req: ControlRequest) -> None:
+        control_queue.put_nowait(req)
+        if isinstance(req, SetUIElementValueRequest):
+            set_ui_element_queue.put_nowait(req)
+
     kernel = Kernel(
         cell_configs=configs,
         app_metadata=app_metadata,
@@ -1791,18 +2227,21 @@ def launch_kernel(
         stderr=stderr,
         stdin=stdin,
         module=patches.patch_main_module(
-            file=app_metadata.filename, input_override=input_override
+            file=app_metadata.filename,
+            input_override=input_override,
+            print_override=print_override,
         ),
         debugger_override=debugger,
         user_config=user_config,
-        enqueue_control_request=lambda req: control_queue.put_nowait(req),
+        enqueue_control_request=_enqueue_control_request,
     )
-    initialize_kernel_context(
+    ctx = initialize_kernel_context(
         kernel=kernel,
         stream=stream,
         stdout=stdout,
         stderr=stderr,
         virtual_files_supported=virtual_files_supported,
+        mode=SessionMode.EDIT if is_edit_mode else SessionMode.RUN,
     )
 
     if is_edit_mode:
@@ -1822,11 +2261,9 @@ def launch_kernel(
 
         # kernels are processes in edit mode, and each process needs to
         # install the formatter import hooks
-        register_formatters()
+        register_formatters(theme=user_config["display"]["theme"])
 
-        signal.signal(
-            signal.SIGINT, handlers.construct_interrupt_handler(kernel)
-        )
+        signal.signal(signal.SIGINT, handlers.construct_interrupt_handler(ctx))
 
         if sys.platform == "win32":
             if interrupt_queue is not None:
@@ -1842,7 +2279,7 @@ def launch_kernel(
 
     ui_element_request_mgr = SetUIElementRequestManager(set_ui_element_queue)
 
-    async def control_loop() -> None:
+    async def control_loop(kernel: Kernel) -> None:
         while True:
             try:
                 request: ControlRequest | None = control_queue.get()
@@ -1863,14 +2300,14 @@ def launch_kernel(
     # top-level await; nothing else is awaited. Don't introduce async
     # primitives anywhere else in the runtime unless there is a *very* good
     # reason; prefer using threads (for performance and clarity).
-    asyncio.run(control_loop())
-
-    if stdout is not None:
-        stdout._watcher.stop()
-    if stderr is not None:
-        stderr._watcher.stop()
-    get_context().virtual_file_registry.shutdown()
+    asyncio.run(control_loop(kernel))
 
     if profiler is not None and profile_path is not None:
         profiler.disable()
         profiler.dump_stats(profile_path)
+
+    get_context().virtual_file_registry.shutdown()
+    teardown_context()
+    kernel.teardown()
+    if isinstance(pipe, connection.Connection):
+        pipe.close()

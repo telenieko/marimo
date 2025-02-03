@@ -3,22 +3,30 @@ from __future__ import annotations
 
 import sys
 import textwrap
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Sequence
 
 import pytest
 
 from marimo._config.config import DEFAULT_CONFIG
+from marimo._dependencies.dependencies import DependencyManager
+from marimo._messaging.cell_output import CellChannel
 from marimo._messaging.errors import (
     CycleError,
     DeleteNonlocalError,
     Error,
     MarimoStrictExecutionError,
+    MarimoSyntaxError,
     MultipleDefinitionError,
 )
 from marimo._messaging.ops import CellOp
 from marimo._messaging.types import NoopStream
 from marimo._plugins.ui._core.ids import IDProvider
 from marimo._plugins.ui._core.ui_element import UIElement
+from marimo._runtime.context.kernel_context import (
+    initialize_kernel_context,
+)
+from marimo._runtime.context.types import teardown_context
 from marimo._runtime.dataflow import EdgeWithVar
 from marimo._runtime.patches import create_main_module
 from marimo._runtime.requests import (
@@ -31,6 +39,7 @@ from marimo._runtime.requests import (
 )
 from marimo._runtime.runtime import Kernel
 from marimo._runtime.scratch import SCRATCH_CELL_ID
+from marimo._server.model import SessionMode
 from marimo._utils.parse_dataclass import parse_raw
 from tests.conftest import ExecReqProvider, MockedKernel
 
@@ -43,6 +52,9 @@ def _check_edges(error: Error, expected_edges: Sequence[EdgeWithVar]) -> None:
     assert len(error.edges_with_vars) == len(expected_edges)
     for edge in expected_edges:
         assert edge in error.edges_with_vars
+
+
+HAS_SQL = DependencyManager.duckdb.has() and DependencyManager.polars.has()
 
 
 class TestExecution:
@@ -327,9 +339,131 @@ class TestExecution:
                 set_ui_element_value_request=SetUIElementValueRequest.from_ids_and_values(
                     [(id_provider.take_id(), 2)]
                 ),
+                auto_run=True,
             )
         )
         assert k.globals["s"].value == 2
+
+    async def test_instantiate_autorun_false(self, any_kernel: Kernel) -> None:
+        k = any_kernel
+        await k.instantiate(
+            CreationRequest(
+                execution_requests=(
+                    ExecutionRequest(cell_id="0", code="x=0"),
+                    er1 := ExecutionRequest(cell_id="1", code="y=x+1"),
+                    er2 := ExecutionRequest(cell_id="2", code="z=x+2"),
+                ),
+                set_ui_element_value_request=SetUIElementValueRequest.from_ids_and_values(
+                    []
+                ),
+                auto_run=False,
+            )
+        )
+        assert not k.errors
+        assert "x" not in k.globals
+        assert "y" not in k.globals
+        assert len(k._uninstantiated_execution_requests) == 3
+
+        # Expect the first cell to implicitly be included in the run ...
+        await k.run([er1])
+        assert k.globals["y"] == 1
+
+        # But z should still not be defined
+        assert "z" not in k.globals
+        assert len(k._uninstantiated_execution_requests) == 1
+
+        # After running er2, no cells should be left uninstantiated
+        await k.run([er2])
+        assert k.globals["z"] == 2
+        assert not k._uninstantiated_execution_requests
+
+    async def test_instantiate_autorun_false_run_stale(
+        self, any_kernel: Kernel
+    ) -> None:
+        k = any_kernel
+        await k.instantiate(
+            CreationRequest(
+                execution_requests=(
+                    ExecutionRequest(cell_id="0", code="x=0"),
+                    ExecutionRequest(cell_id="1", code="y=x+1"),
+                    ExecutionRequest(cell_id="2", code="z=x+2"),
+                ),
+                set_ui_element_value_request=SetUIElementValueRequest.from_ids_and_values(
+                    []
+                ),
+                auto_run=False,
+            )
+        )
+        assert not k.errors
+        assert "x" not in k.globals
+        assert "y" not in k.globals
+        assert len(k._uninstantiated_execution_requests) == 3
+
+        await k.run_stale_cells()
+        assert k.globals["y"] == 1
+        assert k.globals["z"] == 2
+        assert not k._uninstantiated_execution_requests
+
+    async def test_instantiate_autorun_false_delete_cells(
+        self, any_kernel: Kernel
+    ) -> None:
+        k = any_kernel
+        await k.instantiate(
+            CreationRequest(
+                execution_requests=(
+                    ExecutionRequest(cell_id="0", code="x=0"),
+                    ExecutionRequest(cell_id="1", code="y=x+1"),
+                    ExecutionRequest(cell_id="2", code="z=x+2"),
+                ),
+                set_ui_element_value_request=SetUIElementValueRequest.from_ids_and_values(
+                    []
+                ),
+                auto_run=False,
+            )
+        )
+        assert len(k._uninstantiated_execution_requests) == 3
+
+        await k.delete_cell(DeleteCellRequest(cell_id="0"))
+        assert len(k._uninstantiated_execution_requests) == 2
+
+        await k.delete_cell(DeleteCellRequest(cell_id="1"))
+        assert len(k._uninstantiated_execution_requests) == 1
+
+        await k.delete_cell(DeleteCellRequest(cell_id="2"))
+        assert not k._uninstantiated_execution_requests
+
+    async def test_instantiate_autorun_false_run_different_code(
+        self, any_kernel: Kernel
+    ) -> None:
+        k = any_kernel
+        await k.instantiate(
+            CreationRequest(
+                execution_requests=(
+                    ExecutionRequest(cell_id="0", code="x=0"),
+                    er1 := ExecutionRequest(cell_id="1", code="y=x+1"),
+                    er2 := ExecutionRequest(cell_id="2", code="z=x+2"),
+                ),
+                set_ui_element_value_request=SetUIElementValueRequest.from_ids_and_values(
+                    []
+                ),
+                auto_run=False,
+            )
+        )
+        assert len(k._uninstantiated_execution_requests) == 3
+
+        # modify an uninstantiated cell before running it; make sure the old
+        # er gets evicted.
+        await k.run([ExecutionRequest(cell_id="0", code="x = 1")])
+        assert len(k._uninstantiated_execution_requests) == 2
+        assert k.globals["x"] == 1
+
+        await k.run([er1])
+        assert len(k._uninstantiated_execution_requests) == 1
+        assert k.globals["y"] == 2
+
+        await k.run([er2])
+        assert not k._uninstantiated_execution_requests
+        assert k.globals["z"] == 3
 
     # Test errors in marimo semantics
     async def test_kernel_simultaneous_multiple_definition_error(
@@ -536,6 +670,23 @@ class TestExecution:
         assert k.globals["z"] == 2
         assert not k.errors
 
+    async def test_import_module_as_local_var(
+        self, any_kernel: Kernel
+    ) -> None:
+        # Tests that imported names are mangled but still usable
+        k = any_kernel
+        await k.run(
+            [
+                ExecutionRequest(
+                    cell_id="0",
+                    code="import sys as _sys; msize = _sys.maxsize",
+                ),
+            ]
+        )
+        # _sys mangled, should not be in globals
+        assert "_sys" not in k.globals
+        assert k.globals["msize"] == sys.maxsize
+
     async def test_defs_with_no_definers_are_removed_from_cell(
         self, any_kernel: Kernel
     ) -> None:
@@ -573,6 +724,93 @@ class TestExecution:
             await k.run([er])
         assert not k.graph.cells[er.cell_id].stale
         assert k.globals["y"] == 2
+
+    async def test_cell_transitioned_to_error_is_not_stale(
+        self, lazy_kernel: Kernel
+    ) -> None:
+        k = lazy_kernel
+        await k.run(
+            [
+                ExecutionRequest(cell_id="0", code="x=0"),
+                ExecutionRequest(cell_id="1", code="x"),
+            ]
+        )
+
+        # make cell 1 stale
+        await k.run(
+            [
+                ExecutionRequest(cell_id="0", code="x=1"),
+            ]
+        )
+
+        # introduce an error to cell 1; it shouldn't be stale
+        await k.run(
+            [
+                ExecutionRequest(cell_id="1", code="x=0"),
+            ]
+        )
+        assert set(k.errors.keys()) == {"1"}
+        assert not k.graph.cells["1"].stale
+
+    async def test_cell_transitioned_to_syntax_error_is_not_stale(
+        self, lazy_kernel: Kernel
+    ) -> None:
+        k = lazy_kernel
+        await k.run(
+            [
+                ExecutionRequest(cell_id="0", code="x=0"),
+                ExecutionRequest(cell_id="1", code="x"),
+            ]
+        )
+
+        # make cell 1 stale
+        await k.run(
+            [
+                ExecutionRequest(cell_id="0", code="x=1"),
+            ]
+        )
+        cell = k.graph.cells["1"]
+        assert cell.stale
+
+        # introduce a syntax error to cell 1; it shouldn't be stale
+        await k.run(
+            [
+                ExecutionRequest(cell_id="1", code="x ^ !"),
+            ]
+        )
+        assert set(k.errors.keys()) == {"1"}
+        assert isinstance(k.errors["1"][0], MarimoSyntaxError)
+        assert not cell.stale
+
+    async def test_child_of_errored_cell_with_error_not_stale(
+        self,
+        any_kernel: Kernel,
+    ) -> None:
+        k = any_kernel
+        await k.run(
+            [
+                ExecutionRequest(cell_id="0", code="x=0"),
+            ]
+        )
+
+        # multiple definition error
+        await k.run(
+            [
+                ExecutionRequest(cell_id="1", code="y; x=1"),
+            ]
+        )
+
+        # 0 also has a multiple definition error; 1 now depends on 0, but it
+        # is errored and its error is up-to-date, so don't mark it as stale.
+        await k.run(
+            [
+                ExecutionRequest(cell_id="0", code="y = 0; x=1"),
+            ]
+        )
+
+        assert "x" not in k.globals
+        assert set(k.errors.keys()) == {"0", "1"}
+        assert not k.graph.cells["1"].stale
 
     async def test_syntax_error(self, any_kernel: Kernel) -> None:
         k = any_kernel
@@ -771,6 +1009,110 @@ class TestExecution:
 
         assert "pytest" in k.globals["x"]
 
+    async def test_notebook_dir(
+        self, any_kernel: Kernel, exec_req: ExecReqProvider
+    ) -> None:
+        k = any_kernel
+        await k.run(
+            [
+                exec_req.get("import marimo as mo"),
+                exec_req.get("x = mo.notebook_dir()"),
+            ]
+        )
+        assert "x" in k.globals
+        assert k.globals["x"] is None
+
+    async def test_notebook_location(
+        self, any_kernel: Kernel, exec_req: ExecReqProvider
+    ) -> None:
+        k = any_kernel
+        await k.run(
+            [
+                exec_req.get("import marimo as mo"),
+                exec_req.get("loc = mo.notebook_location()"),
+                exec_req.get("dir = mo.notebook_dir()"),
+            ]
+        )
+        assert "loc" in k.globals
+        assert k.globals["loc"] is None
+        assert "dir" in k.globals
+        assert k.globals["dir"] is k.globals["loc"]
+
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="Windows paths behave differently"
+    )
+    async def test_notebook_location_for_pyodide(
+        self, any_kernel: Kernel, exec_req: ExecReqProvider
+    ) -> None:
+        k = any_kernel
+        import sys
+        from types import ModuleType
+
+        # Mock pyodide and js modules
+        sys.modules["pyodide"] = ModuleType("pyodide")
+        js = ModuleType("js")
+        js.location = "https://marimo-team.github.io/marimo-gh-pages-template/notebooks/assets/worker-BxJ8HeOy.js"
+        sys.modules["js"] = js
+
+        try:
+            await k.run(
+                [
+                    exec_req.get(
+                        "import marimo as mo; loc = mo.notebook_location()"
+                    )
+                ]
+            )
+            assert (
+                str(k.globals["loc"])
+                == "https://marimo-team.github.io/marimo-gh-pages-template/notebooks"
+            )
+            assert (
+                str(k.globals["loc"] / "public" / "data.csv")
+                == "https://marimo-team.github.io/marimo-gh-pages-template/notebooks/public/data.csv"
+            )
+        finally:
+            del sys.modules["pyodide"]
+            del sys.modules["js"]
+
+    async def test_notebook_dir_for_unnamed_notebook(
+        self, tmp_path: pathlib.Path, exec_req: ExecReqProvider
+    ) -> None:
+        try:
+            filename = str(tmp_path / "notebook.py")
+            k = Kernel(
+                stream=NoopStream(),
+                stdout=None,
+                stderr=None,
+                stdin=None,
+                cell_configs={},
+                user_config=DEFAULT_CONFIG,
+                app_metadata=AppMetadata(
+                    query_params={}, filename=filename, cli_args={}
+                ),
+                enqueue_control_request=lambda _: None,
+                module=create_main_module(None, None, None),
+            )
+            initialize_kernel_context(
+                kernel=k,
+                stream=k.stream,
+                stdout=k.stdout,
+                stderr=k.stderr,
+                virtual_files_supported=True,
+                mode=SessionMode.EDIT,
+            )
+
+            await k.run(
+                [
+                    exec_req.get("import marimo as mo"),
+                    exec_req.get("x = mo.notebook_dir() / 'foo.csv'"),
+                ]
+            )
+            assert str(k.globals["x"]).endswith("foo.csv")
+        finally:
+            teardown_context()
+            if str(tmp_path) in sys.path:
+                sys.path.remove(str(tmp_path))
+
     async def test_pickle(
         self, any_kernel: Kernel, exec_req: ExecReqProvider
     ) -> None:
@@ -809,7 +1151,7 @@ class TestExecution:
                     query_params={}, filename=filename, cli_args={}
                 ),
                 enqueue_control_request=lambda _: None,
-                module=create_main_module(None, None),
+                module=create_main_module(None, None, None),
             )
             assert str(tmp_path) in sys.path
             assert str(tmp_path) == sys.path[0]
@@ -1027,6 +1369,33 @@ class TestExecution:
             assert k.graph.get_stale() == set([er.cell_id])
             await k.run([er])
         assert k.globals["x"] == "foo"
+
+    async def test_temporaries_deleted(
+        self, k: Kernel, exec_req: ExecReqProvider
+    ) -> None:
+        await k.run([er := exec_req.get("_x = 1")])
+        assert k.globals[f"_cell_{er.cell_id}_x"] == 1
+        await k.run([ExecutionRequest(er.cell_id, "None")])
+        assert f"_cell_{er.cell_id}_x" not in k.globals
+
+    async def test_has_run_id(
+        self, mocked_kernel: MockedKernel, exec_req: ExecReqProvider
+    ) -> None:
+        k = mocked_kernel.k
+        await k.run([exec_req.get("print(2)")])
+
+        cell_ops = [
+            parse_raw(op_data, CellOp)
+            for op_name, op_data in mocked_kernel.stream.messages
+            if op_name == "cell-op"
+        ]
+
+        assert len(cell_ops) == 4  # queued -> running -> output -> idle
+        for cell_op in cell_ops:
+            if cell_op.status == "idle":
+                assert cell_op.run_id is None
+            else:
+                assert cell_op.run_id is not None
 
 
 class TestStrictExecution:
@@ -2018,6 +2387,154 @@ class TestAsyncIO:
         assert k.globals["res"] == "done"
 
 
+@pytest.mark.skipif(not HAS_SQL, reason="SQL deps not available")
+class TestSQL:
+    async def test_sql_table(self, k: Kernel) -> None:
+        await k.run(
+            [
+                ExecutionRequest(
+                    cell_id="0",
+                    code="import marimo as mo",
+                ),
+                ExecutionRequest(
+                    cell_id="1", code="df = mo.sql('SELECT * from t1')"
+                ),
+            ]
+        )
+        assert "df" not in k.globals
+
+        await k.run(
+            [
+                ExecutionRequest(
+                    cell_id="2",
+                    code="import polars as pl; t1_df = pl.from_dict({'a': [42]})",  # noqa: E501
+                ),
+                # cell 1 should automatically execute due to the definition of
+                # t1
+                ExecutionRequest(
+                    cell_id="3",
+                    code="mo.sql('CREATE OR REPLACE TABLE t1 as SELECT * FROM t1_df')",  # noqa: E501
+                ),
+            ]
+        )
+
+        # make sure cell 1 executed, defining df
+        assert k.globals["t1_df"].to_dict(as_series=False) == {"a": [42]}
+
+        await k.delete_cell(DeleteCellRequest(cell_id="3"))
+        # t1 should be dropped since it's an in-memory table;
+        # cell 1 should re-run but will fail to find t1
+        assert "df" not in k.globals
+
+    async def test_sql_table_with_duckdb(self, k: Kernel) -> None:
+        await k.run(
+            [
+                ExecutionRequest(
+                    cell_id="0",
+                    code="import marimo as mo",
+                ),
+                ExecutionRequest(
+                    cell_id="1", code="df = duckdb.sql('SELECT * from t1')"
+                ),
+            ]
+        )
+        assert "df" not in k.globals
+
+        await k.run(
+            [
+                ExecutionRequest(
+                    cell_id="2",
+                    code="import polars as pl; t1_df = pl.from_dict({'a': [42]})",  # noqa: E501
+                ),
+                # cell 1 should automatically execute due to the definition of
+                # t1
+                ExecutionRequest(
+                    cell_id="3",
+                    code="duckdb.sql('CREATE OR REPLACE TABLE t1 as SELECT * FROM t1_df')",  # noqa: E501
+                ),
+            ]
+        )
+
+        # make sure cell 1 executed, defining df
+        assert k.globals["t1_df"].to_dict(as_series=False) == {"a": [42]}
+
+        await k.delete_cell(DeleteCellRequest(cell_id="3"))
+        # t1 should be dropped since it's an in-memory table;
+        # cell 1 should re-run but will fail to find t1
+        assert "df" not in k.globals
+
+    async def test_sql_view(self, k: Kernel) -> None:
+        await k.run(
+            [
+                ExecutionRequest(
+                    cell_id="0",
+                    code="import marimo as mo",
+                ),
+                ExecutionRequest(
+                    cell_id="1", code="df = mo.sql('SELECT * from view')"
+                ),
+            ]
+        )
+        assert "df" not in k.globals
+
+        await k.run(
+            [
+                # cell 1 should automatically execute due to the definition of
+                # t1
+                ExecutionRequest(
+                    cell_id="2",
+                    code="mo.sql('CREATE OR REPLACE VIEW view as SELECT 42')",  # noqa: E501
+                ),
+            ]
+        )
+
+        assert not k.errors
+        # make sure cell 1 executed, defining df
+        assert "df" in k.globals
+
+        await k.delete_cell(DeleteCellRequest(cell_id="2"))
+        # view should be dropped since it's an in-memory table;
+        # cell 1 should re-run but will fail to find t1
+        assert "df" not in k.globals
+
+    async def test_sql_query_as_local_df(self, k: Kernel) -> None:
+        await k.run(
+            [
+                ExecutionRequest(
+                    cell_id="0",
+                    code="import marimo as mo; import polars as pl",
+                ),
+                ExecutionRequest(
+                    cell_id="1",
+                    code="source_df = pl.DataFrame({'val': [42]})",
+                ),
+                ExecutionRequest(
+                    cell_id="2",
+                    code="df = mo.sql('SELECT * FROM source_df')",
+                ),
+            ]
+        )
+        assert not k.errors
+        assert k.globals["df"].to_dict(as_series=False) == {"val": [42]}
+
+        await k.run(
+            [
+                ExecutionRequest(
+                    cell_id="3",
+                    code="""
+import duckdb
+conn = duckdb.connect()""",
+                ),
+                ExecutionRequest(
+                    cell_id="4",
+                    code="df2 = mo.sql('SELECT * FROM source_df', engine=conn)",
+                ),
+            ]
+        )
+        assert not k.errors
+        assert k.globals["df2"].to_dict(as_series=False) == {"val": [42]}
+
+
 class TestStateTransitions:
     async def test_statuses_not_repeated_ok_run(
         self, mocked_kernel: MockedKernel, exec_req: ExecReqProvider
@@ -2191,3 +2708,120 @@ class TestStateTransitions:
 
         assert k.graph.cells[er_1.cell_id].runtime_state == "idle"
         assert k.graph.cells[er_2.cell_id].runtime_state == "idle"
+
+    @staticmethod
+    async def test_variables_broadcast_only_on_change(
+        mocked_kernel: MockedKernel, exec_req: ExecReqProvider
+    ) -> None:
+        k = mocked_kernel.k
+        stream = mocked_kernel.stream
+
+        # Initial run defines x
+        er = exec_req.get("x = 1")
+        await k.run([er])
+        initial_messages = len(
+            [m for m in stream.messages if m[0] == "variables"]
+        )
+        assert initial_messages == 1
+
+        # Re-running same cell shouldn't broadcast Variables
+        stream.messages.clear()
+        await k.run([er])
+        assert not any(m[0] == "variables" for m in stream.messages)
+
+        # Adding a new variable should broadcast Variables
+        stream.messages.clear()
+        er_2 = exec_req.get("y = 1")
+        await k.run([er_2])
+        assert sum(1 for m in stream.messages if m[0] == "variables") == 1
+
+        # Adding a new edge should broadcast Variables
+        stream.messages.clear()
+        await k.run([exec_req.get("z = y")])
+        assert sum(1 for m in stream.messages if m[0] == "variables") == 1
+
+        # Modifying value without changing edges/defs shouldn't broadcast
+        stream.messages.clear()
+        er_2.code = "y = 2"
+        await k.run([exec_req.get_with_id(er_2.cell_id, er_2.code)])
+        assert not any(m[0] == "variables" for m in stream.messages)
+
+        # Deleting a cell should broadcast Variables
+        stream.messages.clear()
+        await k.delete_cell(DeleteCellRequest(cell_id=er_2.cell_id))
+        assert sum(1 for m in stream.messages if m[0] == "variables") == 1
+
+
+class TestErrorHandling:
+    async def test_error_handling(
+        self, mocked_kernel: MockedKernel, exec_req: ExecReqProvider
+    ) -> None:
+        k = mocked_kernel.k
+        await k.run([exec_req.get("raise ValueError('some secret error')")])
+        cell_ops = mocked_kernel.stream.cell_ops
+        error_cell_op = _filter_to_error_ops(cell_ops)
+        assert len(error_cell_op) == 1
+        errors = _parse_error_output(error_cell_op[0])
+
+        assert len(errors) == 1
+        assert errors[0].type == "exception"
+        assert (
+            errors[0].msg
+            == "This cell raised an exception: ValueError('some secret error')"
+        )
+
+    async def test_error_handling_in_run_mode(
+        self, run_mode_kernel: MockedKernel, exec_req: ExecReqProvider
+    ) -> None:
+        k = run_mode_kernel.k
+        await k.run([exec_req.get("raise ValueError('some secret error')")])
+        cell_ops = run_mode_kernel.stream.cell_ops
+        error_cell_op = _filter_to_error_ops(cell_ops)
+        assert len(error_cell_op) == 1
+        errors = _parse_error_output(error_cell_op[0])
+
+        assert len(errors) == 1
+        assert errors[0].type == "internal"
+        assert errors[0].msg.startswith("An internal error occurred: ")
+
+    async def test_error_handling_in_run_mode_stop(
+        self, run_mode_kernel: MockedKernel, exec_req: ExecReqProvider
+    ) -> None:
+        k = run_mode_kernel.k
+        await k.run(
+            [
+                exec_req.get("x = 10"),
+                exec_req.get("x = 20"),
+            ]
+        )
+        cell_ops = run_mode_kernel.stream.cell_ops
+        error_cell_op = _filter_to_error_ops(cell_ops)
+        assert len(error_cell_op) == 2
+        for op in error_cell_op:
+            errors = _parse_error_output(op)
+            assert len(errors) == 1
+            assert errors[0].type == "internal"
+            assert errors[0].msg.startswith("An internal error occurred: ")
+
+
+def _parse_error_output(cell_op: CellOp) -> list[Error]:
+    error_output = cell_op.output
+    assert error_output is not None
+    assert error_output.channel == CellChannel.MARIMO_ERROR
+    assert error_output.mimetype == "application/vnd.marimo+error"
+    data = error_output.data
+
+    @dataclass
+    class Container:
+        errors: list[Error]
+
+    return parse_raw({"errors": data}, Container).errors
+
+
+def _filter_to_error_ops(cell_ops: list[CellOp]) -> list[CellOp]:
+    return [
+        op
+        for op in cell_ops
+        if op.output is not None
+        and op.output.channel == CellChannel.MARIMO_ERROR
+    ]

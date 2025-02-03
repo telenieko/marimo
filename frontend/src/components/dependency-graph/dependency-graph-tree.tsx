@@ -7,14 +7,11 @@ import ReactFlow, {
   BackgroundVariant,
   type Node,
   type Edge,
+  ControlButton,
+  useReactFlow,
 } from "reactflow";
 
-import React, {
-  type PropsWithChildren,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
+import React, { type PropsWithChildren, useEffect, useState } from "react";
 import {
   EdgeMarkerContext,
   nodeTypes,
@@ -31,6 +28,11 @@ import useEvent from "react-use-event-hook";
 import { scrollAndHighlightCell } from "../editor/links/cell-link";
 import { GraphSelectionPanel } from "./panels";
 import { useFitToViewOnDimensionChange } from "./utils/useFitToViewOnDimensionChange";
+import { MapPinIcon } from "lucide-react";
+import { store } from "@/core/state/jotai";
+import { lastFocusedCellIdAtom } from "@/core/cells/focus";
+import { Tooltip } from "../ui/tooltip";
+import { Events } from "@/utils/events";
 
 interface Props {
   cellIds: CellId[];
@@ -50,7 +52,8 @@ export const DependencyGraphTree: React.FC<PropsWithChildren<Props>> = ({
   layoutDirection,
   settings,
 }) => {
-  const initial = useMemo(() => {
+  // eslint-disable-next-line react/hook-use-state
+  const [initial] = useState(() => {
     let elements = elementsBuilder.createElements(
       cellIds,
       cellAtoms,
@@ -63,11 +66,11 @@ export const DependencyGraphTree: React.FC<PropsWithChildren<Props>> = ({
 
     return elements;
     // Only run once
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  });
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initial.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initial.edges);
+  const api = useReactFlow();
 
   const syncChanges = useEvent(
     (elements: { nodes: Array<Node<NodeData>>; edges: Edge[] }) => {
@@ -94,6 +97,10 @@ export const DependencyGraphTree: React.FC<PropsWithChildren<Props>> = ({
 
   const [selection, setSelection] = useState<GraphSelection>();
   useFitToViewOnDimensionChange();
+
+  const handleClearSelection = () => {
+    setSelection(undefined);
+  };
 
   return (
     <EdgeMarkerContext.Provider value={layoutDirection}>
@@ -127,11 +134,42 @@ export const DependencyGraphTree: React.FC<PropsWithChildren<Props>> = ({
         nodesConnectable={false}
       >
         <Background color="#ccc" variant={BackgroundVariant.Dots} />
-        <Controls position="bottom-right" showInteractive={false} />
+        <Controls position="bottom-right" showInteractive={false}>
+          <Tooltip
+            content="Jump to focused cell"
+            delayDuration={200}
+            side="left"
+            asChild={false}
+          >
+            <ControlButton
+              onMouseDown={Events.preventFocus}
+              onClick={() => {
+                const lastFocusedCell = store.get(lastFocusedCellIdAtom);
+                // Zoom the graph to the last focused cell
+                if (lastFocusedCell) {
+                  const node = nodes.find(
+                    (node) => node.id === lastFocusedCell,
+                  );
+                  if (node) {
+                    api.fitView({
+                      padding: 1,
+                      duration: 600,
+                      nodes: [node],
+                    });
+                    setSelection({ type: "node", id: lastFocusedCell });
+                  }
+                }
+              }}
+            >
+              <MapPinIcon className="size-4" />
+            </ControlButton>
+          </Tooltip>
+        </Controls>
         <GraphSelectionPanel
           selection={selection}
           variables={variables}
           edges={edges}
+          onClearSelection={handleClearSelection}
         />
         {children}
       </ReactFlow>

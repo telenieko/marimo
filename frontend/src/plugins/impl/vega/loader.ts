@@ -1,61 +1,108 @@
 /* Copyright 2024 Marimo. All rights reserved. */
 import type { DataFormat } from "./types";
 import { isNumber } from "lodash-es";
-import {
-  typeParsers,
-  createLoader,
-  read,
-  type FieldTypes,
-} from "./vega-loader";
+import { typeParsers, createLoader, read, type DataType } from "./vega-loader";
+import { Objects } from "@/utils/objects";
+import { Logger } from "@/utils/Logger";
 
-// Augment the typeParsers to support Date
-typeParsers.date = (value: string) => new Date(value).toISOString();
-const previousBooleanParser = typeParsers.boolean;
-const previousNumberParser = typeParsers.number;
+type Unsubscribe = () => void;
+type Middleware = () => Unsubscribe;
+
+// Store all the previous type parsers so we can restore them later
 const previousIntegerParser = typeParsers.integer;
+const previousNumberParser = typeParsers.number;
+const previousDateParser = typeParsers.date;
+const previousBooleanParser = typeParsers.boolean;
 
-// Custom parser to:
-// - handle BigInt
-// - handle inf and -inf
-const customIntegerParser = (v: string) => {
-  if (v === "") {
-    return "";
-  }
-  if (v === "-inf") {
-    return v;
-  }
-  if (v === "inf") {
-    return v;
-  }
+const BIG_INT_MIDDLEWARE: Middleware = () => {
+  // Custom parser to:
+  // - handle BigInt
+  // - handle inf and -inf
+  typeParsers.integer = (v: string) => {
+    if (v === "") {
+      return "";
+    }
+    if (v === "-inf") {
+      return v;
+    }
+    if (v === "inf") {
+      return v;
+    }
 
-  const parsedInt = Number.parseInt(v);
-  if (isNumber(parsedInt)) {
-    const needsBigInt = Math.abs(parsedInt) > Number.MAX_SAFE_INTEGER;
-    if (!needsBigInt) {
-      return previousIntegerParser(v);
+    function previousIntegerParserWithoutNaN(v: string) {
+      const result = previousIntegerParser(v);
+      // If the result is NaN, return the original value
+      if (Number.isNaN(result)) {
+        return v;
+      }
+      return result;
     }
-    try {
-      return BigInt(v);
-    } catch {
-      // Floats like 2.0 are parseable as ints but not
-      // as BigInt
-      return previousIntegerParser(v);
+
+    const parsedInt = Number.parseInt(v);
+    if (isNumber(parsedInt)) {
+      const needsBigInt = Math.abs(parsedInt) > Number.MAX_SAFE_INTEGER;
+      if (!needsBigInt) {
+        return previousIntegerParserWithoutNaN(v);
+      }
+      try {
+        return BigInt(v);
+      } catch {
+        // Floats like 2.0 are parseable as ints but not
+        // as BigInt
+        return previousIntegerParserWithoutNaN(v);
+      }
+    } else {
+      return "";
     }
-  } else {
-    return "";
-  }
+  };
+  typeParsers.number = (v: string) => {
+    if (v === "-inf") {
+      return v;
+    }
+    if (v === "inf") {
+      return v;
+    }
+    const result = previousNumberParser(v);
+    if (Number.isNaN(result)) {
+      return v;
+    }
+    return result;
+  };
+
+  return () => {
+    typeParsers.integer = previousIntegerParser;
+    typeParsers.number = previousNumberParser;
+  };
 };
 
-// Custom number parser to:
-// - handle inf and -inf
-const customNumberParser = (v: string) => {
-  if (v === "-inf") {
-    return v;
-  }
-  if (v === "inf") {
-    return v;
-  }
-  return previousNumberParser(v);
+const DATE_MIDDLEWARE: Middleware = () => {
+  typeParsers.date = (value: string) => {
+    if (value === "") {
+      return "";
+    }
+    if (value == null) {
+      return null;
+    }
+    // Only parse strings that look like ISO dates (YYYY-MM-DD with optional time)
+    const isoDateRegex = /^\d{4}-\d{2}-\d{2}(T[\d.:]+(Z|[+-]\d{2}:?\d{2})?)?$/;
+    if (!isoDateRegex.test(value)) {
+      return value;
+    }
+    try {
+      const date = new Date(value);
+      // Ensure the date is valid by checking if it can be converted back to ISO
+      if (Number.isNaN(date.getTime())) {
+        return value;
+      }
+      return date;
+    } catch {
+      Logger.warn(`Failed to parse date: ${value}`);
+      return value;
+    }
+  };
+  return () => {
+    typeParsers.date = previousDateParser;
+  };
 };
 
 // Custom boolean parser:
@@ -74,16 +121,6 @@ const customBooleanParser = (v: string) => {
 
 typeParsers.boolean = customBooleanParser;
 
-function enableBigInt() {
-  typeParsers.integer = customIntegerParser;
-  typeParsers.number = customNumberParser;
-}
-
-function disableBigInt() {
-  typeParsers.integer = previousIntegerParser;
-  typeParsers.number = previousNumberParser;
-}
-
 export const vegaLoader = createLoader();
 
 /**
@@ -91,17 +128,28 @@ export const vegaLoader = createLoader();
  *
  * This resolves to an array of objects, where each object represents a row.
  */
-export function vegaLoadData<T = object>(
+export async function vegaLoadData<T = object>(
   url: string,
   format: DataFormat | undefined | { type: "csv"; parse: "auto" },
   opts: {
-    handleBigInt?: boolean;
+    // We support enabling/disabling since the Table enables it
+    // but Vega does not support BigInts
+    handleBigIntAndNumberLike?: boolean;
     replacePeriod?: boolean;
   } = {},
 ): Promise<T[]> {
-  const { handleBigInt = false, replacePeriod = false } = opts;
+  const { handleBigIntAndNumberLike = false, replacePeriod = false } = opts;
 
-  return vegaLoader.load(url).then((csvOrJsonData) => {
+  const middleware: Middleware[] = [DATE_MIDDLEWARE];
+  if (handleBigIntAndNumberLike) {
+    middleware.push(BIG_INT_MIDDLEWARE);
+  }
+
+  let unsubscribes: Unsubscribe[] = [];
+
+  // Load the data
+  try {
+    let csvOrJsonData = await vegaLoader.load(url);
     if (!format) {
       // Infer by trying to parse
       if (typeof csvOrJsonData === "string") {
@@ -134,37 +182,57 @@ export function vegaLoadData<T = object>(
       csvOrJsonData = replacePeriodsInColumnNames(csvOrJsonData);
     }
 
-    // We support enabling/disabling since the Table enables it
-    // but Vega does not support BigInts
-    if (handleBigInt) {
-      enableBigInt();
+    let parse = (format?.parse as Record<string, DataType>) || "auto";
+    // Map some of our data types to Vega's data types
+    // - time -> string
+    // - datetime -> date
+    if (typeof parse === "object") {
+      parse = Objects.mapValues(parse, (value) => {
+        if (value === "time") {
+          return "string";
+        }
+        if (value === "datetime") {
+          return "date";
+        }
+        return value;
+      });
     }
 
+    // Apply middleware
+    unsubscribes = middleware.map((m) => m());
     // Always set parse to auto for csv data, to be able to parse dates and floats
     const results = isCsv
       ? // csv -> json
         read(csvOrJsonData, {
           ...format,
-          parse: (format?.parse as FieldTypes) || "auto",
+          parse: parse,
         })
       : read(csvOrJsonData, format);
 
-    if (handleBigInt) {
-      disableBigInt();
-    }
-
     return results as T[];
-  });
+  } finally {
+    // Unsubscribe from middleware
+    unsubscribes.forEach((u) => u());
+  }
 }
 
-export function parseCsvData(csvData: string, handleBigInt = true): object[] {
-  if (handleBigInt) {
-    enableBigInt();
+export function parseCsvData(
+  csvData: string,
+  handleBigIntAndNumberLike = true,
+): object[] {
+  const middleware: Middleware[] = [DATE_MIDDLEWARE];
+  if (handleBigIntAndNumberLike) {
+    middleware.push(BIG_INT_MIDDLEWARE);
   }
+
+  // Apply middleware
+  const unsubscribes = middleware.map((m) => m());
+
   const data = read(csvData, { type: "csv", parse: "auto" });
-  if (handleBigInt) {
-    disableBigInt();
-  }
+
+  // Unsubscribe from middleware
+  unsubscribes.forEach((u) => u());
+
   return data;
 }
 

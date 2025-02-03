@@ -1,7 +1,10 @@
 # App
 
-```{eval-rst}
-.. autoclass:: marimo.App
+::: marimo.App
+    options:
+      members:
+        - embed
 
-  .. automethod:: marimo.App.embed
-```
+## AppMeta
+
+::: marimo.app_meta

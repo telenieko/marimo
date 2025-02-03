@@ -8,8 +8,7 @@ import {
 } from "./schema";
 import { TransformPanel } from "./panel";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Code2Icon, FunctionSquareIcon } from "lucide-react";
-import { CodePanel } from "./python/code-panel";
+import { Code2Icon, DatabaseIcon, FunctionSquareIcon } from "lucide-react";
 import type { ColumnDataTypes, ColumnId } from "./types";
 import { createPlugin } from "@/plugins/core/builder";
 import { rpc } from "@/plugins/core/rpc";
@@ -19,8 +18,13 @@ import { Functions } from "@/utils/functions";
 import { Arrays } from "@/utils/arrays";
 import { memo, useEffect, useRef, useState } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { Banner, ErrorBanner } from "../common/error-banner";
+import { ErrorBanner } from "../common/error-banner";
 import type { DataType } from "../vega/vega-loader";
+import type { FieldTypesWithExternalType } from "@/components/data-table/types";
+import { Spinner } from "@/components/icons/spinner";
+import { ReadonlyCode } from "@/components/editor/code/readonly-python-code";
+import { isEqual } from "lodash-es";
+import { DATA_TYPES } from "@/core/kernel/messages";
 
 type CsvURL = string;
 type TableData<T> = T[] | CsvURL;
@@ -34,7 +38,6 @@ type TableData<T> = T[] | CsvURL;
 interface Data {
   label?: string | null;
   columns: ColumnDataTypes;
-  dataframeName: string;
   pageSize: number;
 }
 
@@ -42,10 +45,11 @@ interface Data {
 type PluginFunctions = {
   get_dataframe: (req: {}) => Promise<{
     url: string;
-    has_more: boolean;
     total_rows: number;
     row_headers: string[];
-    supports_code_sample: boolean;
+    field_types: FieldTypesWithExternalType | null;
+    python_code?: string | null;
+    sql_code?: string | null;
   }>;
   get_column_values: (req: { column: string }) => Promise<{
     values: unknown[];
@@ -73,7 +77,6 @@ export const DataFramePlugin = createPlugin<S>("marimo-dataframe")
   .withData(
     z.object({
       label: z.string().nullish(),
-      dataframeName: z.string(),
       pageSize: z.number().default(5),
       columns: z
         .array(z.tuple([z.string().or(z.number()), z.string(), z.string()]))
@@ -91,10 +94,13 @@ export const DataFramePlugin = createPlugin<S>("marimo-dataframe")
     get_dataframe: rpc.input(z.object({})).output(
       z.object({
         url: z.string(),
-        has_more: z.boolean(),
         total_rows: z.number(),
         row_headers: z.array(z.string()),
-        supports_code_sample: z.boolean(),
+        field_types: z.array(
+          z.tuple([z.string(), z.tuple([z.enum(DATA_TYPES), z.string()])]),
+        ),
+        python_code: z.string().nullish(),
+        sql_code: z.string().nullish(),
       }),
     ),
     get_column_values: rpc.input(z.object({ column: z.string() })).output(
@@ -145,7 +151,6 @@ const EMPTY: Transformations = {
 export const DataFrameComponent = memo(
   ({
     columns,
-    dataframeName,
     pageSize,
     value,
     setValue,
@@ -153,12 +158,12 @@ export const DataFrameComponent = memo(
     get_column_values,
     search,
   }: DataTableProps): JSX.Element => {
-    const { data, error } = useAsyncData(
+    const { data, error, loading } = useAsyncData(
       () => get_dataframe({}),
       [value?.transforms],
     );
 
-    const { url, has_more, total_rows, row_headers, supports_code_sample } =
+    const { url, total_rows, row_headers, field_types, python_code, sql_code } =
       data || {};
 
     const [internalValue, setInternalValue] = useState<Transformations>(
@@ -178,23 +183,33 @@ export const DataFrameComponent = memo(
       if (value?.transforms.length !== prevValue.transforms.length) {
         setValue(prevValue);
       }
-    }, [data, value?.transforms, prevValueRef, setValue]);
+    }, [data, value?.transforms.length, prevValueRef, setValue]);
 
     return (
       <div>
         <Tabs defaultValue="transform">
-          <TabsList className="h-8">
-            <TabsTrigger value="transform" className="text-xs py-1">
-              <FunctionSquareIcon className="w-3 h-3 mr-2" />
-              Transform
-            </TabsTrigger>
-            {supports_code_sample && (
-              <TabsTrigger value="code" className="text-xs py-1">
-                <Code2Icon className="w-3 h-3 mr-2" />
-                Code
+          <div className="flex items-center gap-2">
+            <TabsList className="h-8">
+              <TabsTrigger value="transform" className="text-xs py-1">
+                <FunctionSquareIcon className="w-3 h-3 mr-2" />
+                Transform
               </TabsTrigger>
-            )}
-          </TabsList>
+              {python_code && (
+                <TabsTrigger value="python-code" className="text-xs py-1">
+                  <Code2Icon className="w-3 h-3 mr-2" />
+                  Python Code
+                </TabsTrigger>
+              )}
+              {sql_code && (
+                <TabsTrigger value="sql-code" className="text-xs py-1">
+                  <DatabaseIcon className="w-3 h-3 mr-2" />
+                  SQL Code
+                </TabsTrigger>
+              )}
+              <div className="flex-grow" />
+            </TabsList>
+            {loading && <Spinner size="small" />}
+          </div>
           <TabsContent
             value="transform"
             className="mt-1 border rounded-t overflow-hidden"
@@ -202,37 +217,56 @@ export const DataFrameComponent = memo(
             <TransformPanel
               initialValue={internalValue}
               columns={columns}
-              onChange={(v) => {
+              onChange={(newValue) => {
+                // Ignore changes that are the same
+                if (isEqual(newValue, value)) {
+                  return;
+                }
                 // Update the value valid changes
-                setValue(v);
-                setInternalValue(v);
+                setValue(newValue);
+                setInternalValue(newValue);
               }}
               onInvalidChange={setInternalValue}
               getColumnValues={get_column_values}
             />
           </TabsContent>
-          {supports_code_sample && (
+          {python_code && (
             <TabsContent
-              value="code"
+              value="python-code"
               className="mt-1 border rounded-t overflow-hidden"
             >
-              <CodePanel dataframeName={dataframeName} transforms={value} />
+              <ReadonlyCode
+                minHeight="215px"
+                maxHeight="215px"
+                code={python_code}
+                language="python"
+              />
+            </TabsContent>
+          )}
+          {sql_code && (
+            <TabsContent
+              value="sql-code"
+              className="mt-1 border rounded-t overflow-hidden"
+            >
+              <ReadonlyCode
+                minHeight="215px"
+                maxHeight="215px"
+                code={sql_code}
+                language="sql"
+              />
             </TabsContent>
           )}
         </Tabs>
         {error && <ErrorBanner error={error} />}
-        {has_more && total_rows != null && (
-          <Banner className="shadow-none!">
-            Result clipped. Total rows {prettyNumber(total_rows)}.
-          </Banner>
-        )}
         <LoadingDataTableComponent
           label={null}
           className="rounded-b border-x border-b"
           data={url || ""}
           totalRows={total_rows ?? 0}
+          totalColumns={Object.keys(columns).length}
           pageSize={pageSize}
           pagination={true}
+          fieldTypes={field_types}
           rowHeaders={row_headers || Arrays.EMPTY}
           showDownload={false}
           download_as={Functions.THROW}
@@ -253,8 +287,4 @@ DataFrameComponent.displayName = "DataFrameComponent";
 
 function getColumnSummaries() {
   return Promise.resolve({ summaries: [], data: null });
-}
-
-function prettyNumber(value: number): string {
-  return new Intl.NumberFormat().format(value);
 }

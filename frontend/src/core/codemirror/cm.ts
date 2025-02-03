@@ -4,6 +4,8 @@ import {
   closeBrackets,
   closeBracketsKeymap,
   startCompletion,
+  moveCompletionSelection,
+  completionStatus,
 } from "@codemirror/autocomplete";
 import {
   history,
@@ -56,6 +58,9 @@ import { historyCompartment } from "./editing/extensions";
 import { goToDefinitionBundle } from "./go-to-definition/extension";
 import type { HotkeyProvider } from "../hotkeys/hotkeys";
 import { lightTheme } from "./theme/light";
+import { dndBundle } from "./misc/dnd";
+import { jupyterHelpExtension } from "./compat/jupyter";
+import { pasteBundle } from "./misc/paste";
 
 export interface CodeMirrorSetupOpts {
   cellId: CellId;
@@ -84,6 +89,9 @@ export const setupCodeMirror = (opts: CodeMirrorSetupOpts): Extension[] => {
   return [
     // Editor keymaps (vim or defaults) based on user config
     keymapBundle(keymapConfig, cellMovementCallbacks),
+    dndBundle(),
+    pasteBundle(),
+    jupyterHelpExtension(),
     // Cell editing
     cellMovementBundle(cellId, cellMovementCallbacks, hotkeys),
     cellCodeEditingBundle(cellId, cellCodeCallbacks, hotkeys),
@@ -161,6 +169,28 @@ export const basicBundle = (opts: CodeMirrorSetupOpts): Extension[] => {
             startCompletionAtEndOfLine(cm) ||
             indentMore(cm)
           );
+        },
+        preventDefault: true,
+      },
+      {
+        key: hotkeys.getHotkey("completion.moveDown").key,
+        run: (cm) => {
+          if (completionStatus(cm.state) !== null) {
+            moveCompletionSelection(true)(cm);
+            return true;
+          }
+          return false;
+        },
+        preventDefault: true,
+      },
+      {
+        key: hotkeys.getHotkey("completion.moveUp").key,
+        run: (cm) => {
+          if (completionStatus(cm.state) !== null) {
+            moveCompletionSelection(false)(cm);
+            return true;
+          }
+          return false;
         },
         preventDefault: true,
       },

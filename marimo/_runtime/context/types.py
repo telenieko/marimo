@@ -13,10 +13,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 from marimo._config.config import MarimoConfig
+from marimo._messaging.context import HTTP_REQUEST_CTX
 from marimo._messaging.types import Stderr, Stdout
 from marimo._runtime import dataflow
 from marimo._runtime.cell_lifecycle_registry import CellLifecycleRegistry
 from marimo._runtime.functions import FunctionRegistry
+from marimo._runtime.requests import HTTPRequest
 
 if TYPE_CHECKING:
     from marimo._ast.app import InternalApp
@@ -25,7 +27,7 @@ if TYPE_CHECKING:
     from marimo._output.hypertext import Html
     from marimo._plugins.ui._core.registry import UIElementRegistry
     from marimo._runtime.params import CLIArgs, QueryParams
-    from marimo._runtime.state import State
+    from marimo._runtime.state import State, StateRegistry
     from marimo._runtime.virtual_file import VirtualFileRegistry
 
 
@@ -64,15 +66,18 @@ class ExecutionContext:
 @dataclass
 class RuntimeContext(abc.ABC):
     ui_element_registry: UIElementRegistry
+    state_registry: StateRegistry
     function_registry: FunctionRegistry
     cell_lifecycle_registry: CellLifecycleRegistry
     virtual_file_registry: VirtualFileRegistry
     virtual_files_supported: bool
+    # stream, stdout, stderr are _not_ owned by the context
     stream: Stream
     stdout: Stdout | None
     stderr: Stderr | None
     children: list[RuntimeContext]
     parent: RuntimeContext | None
+    filename: str | None
 
     @property
     @abc.abstractmethod
@@ -91,8 +96,17 @@ class RuntimeContext(abc.ABC):
 
     @property
     @abc.abstractmethod
-    def user_config(self) -> MarimoConfig:
+    def marimo_config(self) -> MarimoConfig:
+        """
+        Get the marimo configuration.
+        This is a merged configuration from the user config and project config.
+        """
         pass
+
+    @property
+    def request(self) -> Optional[HTTPRequest]:
+        """Get the current request context if any."""
+        return HTTP_REQUEST_CTX.get(None)
 
     @property
     @abc.abstractmethod

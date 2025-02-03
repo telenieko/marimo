@@ -6,13 +6,16 @@ from dataclasses import dataclass
 from typing import Any, Literal, Optional, Union
 
 from marimo._ast.cell import CellId_t
-from marimo._data.models import DataTable
+from marimo._data.models import DataSourceConnection, DataTable
 from marimo._messaging.cell_output import CellChannel, CellOutput
 from marimo._messaging.ops import (
     CellOp,
     Datasets,
+    DataSourceConnections,
     Interrupted,
     MessageOperation,
+    UpdateCellCodes,
+    UpdateCellIdsRequest,
     Variables,
     VariableValue,
     VariableValues,
@@ -35,10 +38,14 @@ class SessionView:
     """
 
     def __init__(self) -> None:
+        # Last seen cell IDs
+        self.cell_ids: Optional[UpdateCellIdsRequest] = None
         # List of operations we care about keeping track of.
         self.cell_operations: dict[CellId_t, CellOp] = {}
         # The most recent datasets operation.
-        self.datasets: Datasets = Datasets(tables=[])
+        self.datasets = Datasets(tables=[])
+        # The most recent data-connectors operation
+        self.data_connectors = DataSourceConnections(connections=[])
         # The most recent Variables operation.
         self.variable_operations: Variables = Variables(variables=[])
         # Map of variable name to value.
@@ -49,6 +56,13 @@ class SessionView:
         self.last_executed_code: dict[CellId_t, str] = {}
         # Map of cell id to the last cell execution time
         self.last_execution_time: dict[CellId_t, float] = {}
+        # Any stale code that was read from a file-watcher
+        self.stale_code: Optional[UpdateCellCodes] = None
+
+        # Auto-saving
+        self.has_auto_exported_html = False
+        self.has_auto_exported_md = False
+        self.has_auto_exported_ipynb = False
 
     def _add_ui_value(self, name: str, value: Any) -> None:
         self.ui_values[name] = value
@@ -57,6 +71,8 @@ class SessionView:
         self.last_executed_code[req.cell_id] = req.code
 
     def add_raw_operation(self, raw_operation: Any) -> None:
+        self._touch()
+
         # parse_raw only accepts a dataclass, so we wrap MessageOperation in a
         # dataclass.
         @dataclass
@@ -67,6 +83,8 @@ class SessionView:
         self.add_operation(operation.operation)
 
     def add_control_request(self, request: ControlRequest) -> None:
+        self._touch()
+
         if isinstance(request, SetUIElementValueRequest):
             for object_id, value in request.ids_and_values:
                 self._add_ui_value(object_id, value)
@@ -83,6 +101,8 @@ class SessionView:
                 self._add_last_run_code(execution_request)
 
     def add_stdin(self, stdin: str) -> None:
+        self._touch()
+
         """Add a stdin request to the session view."""
         # Find the first cell that is waiting for stdin.
         for cell_op in self.cell_operations.values():
@@ -94,6 +114,8 @@ class SessionView:
                     return
 
     def add_operation(self, operation: MessageOperation) -> None:
+        self._touch()
+
         """Add an operation to the session view."""
 
         if isinstance(operation, CellOp):
@@ -130,6 +152,15 @@ class SessionView:
                     next_tables[table.name] = table
             self.datasets = Datasets(tables=list(next_tables.values()))
 
+            # Remove any data source connections that are no longer in scope.
+            next_connections: dict[str, DataSourceConnection] = {}
+            for connection in self.data_connectors.connections:
+                if connection.name in variable_names:
+                    next_connections[connection.name] = connection
+            self.data_connectors = DataSourceConnections(
+                connections=list(next_connections.values())
+            )
+
         elif isinstance(operation, VariableValues):
             for value in operation.variables:
                 self.variable_values[value.name] = value
@@ -152,6 +183,26 @@ class SessionView:
             for table in operation.tables:
                 tables[table.name] = table
             self.datasets = Datasets(tables=list(tables.values()))
+
+        elif isinstance(operation, DataSourceConnections):
+            # Update data source connections, dedupe by name and keep the latest
+            prev_connections = self.data_connectors.connections
+            connections = {c.name: c for c in prev_connections}
+
+            for c in operation.connections:
+                connections[c.name] = c
+
+            self.data_connectors = DataSourceConnections(
+                connections=list(connections.values())
+            )
+
+        elif isinstance(operation, UpdateCellIdsRequest):
+            self.cell_ids = operation
+
+        elif (
+            isinstance(operation, UpdateCellCodes) and operation.code_is_stale
+        ):
+            self.stale_code = operation
 
     def get_cell_outputs(
         self, ids: list[CellId_t]
@@ -196,6 +247,8 @@ class SessionView:
     @property
     def operations(self) -> list[MessageOperation]:
         all_ops: list[MessageOperation] = []
+        if self.cell_ids:
+            all_ops.append(self.cell_ids)
         if self.variable_operations.variables:
             all_ops.append(self.variable_operations)
         if self.variable_values:
@@ -204,8 +257,26 @@ class SessionView:
             )
         if self.datasets.tables:
             all_ops.append(self.datasets)
+        if self.data_connectors.connections:
+            all_ops.append(self.data_connectors)
         all_ops.extend(self.cell_operations.values())
+        if self.stale_code:
+            all_ops.append(self.stale_code)
         return all_ops
+
+    def mark_auto_export_html(self) -> None:
+        self.has_auto_exported_html = True
+
+    def mark_auto_export_md(self) -> None:
+        self.has_auto_exported_md = True
+
+    def mark_auto_export_ipynb(self) -> None:
+        self.has_auto_exported_ipynb = True
+
+    def _touch(self) -> None:
+        self.has_auto_exported_html = False
+        self.has_auto_exported_md = False
+        self.has_auto_exported_ipynb = False
 
 
 def merge_cell_operation(

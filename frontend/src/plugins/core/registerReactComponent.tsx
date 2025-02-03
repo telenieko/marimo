@@ -41,7 +41,11 @@ import useEvent from "react-use-event-hook";
 import { Functions } from "@/utils/functions";
 import { StyleNamespace } from "@/theme/namespace";
 import { UIElementRegistry } from "@/core/dom/uiregistry";
-import { useEventListener } from "@/hooks/useEventListener";
+import {
+  type HTMLElementNotDerivedFromRef,
+  useEventListener,
+} from "@/hooks/useEventListener";
+import { shallowCompare } from "@/utils/shallow-compare";
 
 export interface PluginSlotHandle {
   /**
@@ -98,11 +102,15 @@ function PluginSlotInternal<T>(
   }));
 
   // Listen to value updates
-  useEventListener(hostElement, MarimoValueUpdateEvent.TYPE, (e) => {
-    if (e.detail.element === hostElement) {
-      setValue(e.detail.value as T);
-    }
-  });
+  useEventListener(
+    hostElement as HTMLElementNotDerivedFromRef,
+    MarimoValueUpdateEvent.TYPE,
+    (e) => {
+      if (e.detail.element === hostElement) {
+        setValue(e.detail.value as T);
+      }
+    },
+  );
 
   // We create a mutation observer to listen for changes to the host element's attributes
   // and update the plugin's data accordingly
@@ -134,6 +142,12 @@ function PluginSlotInternal<T>(
     setValue((prevValue) => {
       const updater = Functions.asUpdater(value);
       const nextValue = updater(prevValue);
+      // Shallow compare the values
+      // If the value hasn't changed, we don't need to send an input event
+      if (shallowCompare(nextValue, prevValue)) {
+        return nextValue;
+      }
+
       hostElement.dispatchEvent(createInputEvent(nextValue, hostElement));
       return nextValue;
     });
@@ -400,9 +414,13 @@ export function registerReactComponent<T>(plugin: IPlugin<T, unknown>): void {
 
       // Custom styles provided by the plugin
       if (plugin.cssStyles) {
-        const style = document.createElement("style");
-        style.textContent = plugin.cssStyles.join("\n");
-        shadowRoot.append(style);
+        const pluginSheet = new CSSStyleSheet();
+        pluginSheet.replaceSync(plugin.cssStyles.join("\n"));
+        // Add plugin styles last to take precedence
+        shadowRoot.adoptedStyleSheets = [
+          ...shadowRoot.adoptedStyleSheets,
+          pluginSheet,
+        ];
       }
     }
 
@@ -434,6 +452,13 @@ export function registerReactComponent<T>(plugin: IPlugin<T, unknown>): void {
       });
 
       shadowRoot.append(...styleSheets);
+
+      // Custom styles provided by the plugin
+      if (plugin.cssStyles) {
+        const style = document.createElement("style");
+        style.textContent = plugin.cssStyles.join("\n");
+        shadowRoot.append(style);
+      }
     }
 
     private isAdoptedStyleSheetsSupported() {

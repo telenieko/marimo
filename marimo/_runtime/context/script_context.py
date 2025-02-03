@@ -1,12 +1,14 @@
 # Copyright 2024 Marimo. All rights reserved.
 from __future__ import annotations
 
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 from marimo._cli.parse_args import args_from_argv
 from marimo._config.config import MarimoConfig
+from marimo._config.manager import get_default_config_manager
 from marimo._plugins.ui._core.ids import NoIDProviderException
 from marimo._plugins.ui._core.registry import UIElementRegistry
 from marimo._runtime.cell_lifecycle_registry import CellLifecycleRegistry
@@ -18,12 +20,16 @@ from marimo._runtime.context.types import (
 from marimo._runtime.dataflow import DirectedGraph
 from marimo._runtime.functions import FunctionRegistry
 from marimo._runtime.params import CLIArgs, QueryParams
+from marimo._runtime.patches import (
+    create_main_module,
+    patch_main_module_context,
+)
+from marimo._runtime.state import State, StateRegistry
 
 if TYPE_CHECKING:
     from marimo._ast.app import InternalApp
     from marimo._ast.cell import CellId_t
     from marimo._messaging.types import Stream
-    from marimo._runtime.state import State
 
 
 @dataclass
@@ -34,7 +40,7 @@ class ScriptRuntimeContext(RuntimeContext):
 
     def __post_init__(self) -> None:
         self._cli_args: CLIArgs | None = None
-        self._query_params = QueryParams({})
+        self._query_params = QueryParams({}, _registry=self.state_registry)
 
     @property
     def graph(self) -> DirectedGraph:
@@ -42,15 +48,24 @@ class ScriptRuntimeContext(RuntimeContext):
 
     @property
     def globals(self) -> dict[str, Any]:
-        return {}
+        with patch_main_module_context(
+            create_main_module(
+                file=None, input_override=None, print_override=None
+            )
+        ) as module:
+            glbls = module.__dict__
+        glbls.update(sys.modules["__main__"].__dict__)
+        return glbls
 
     @property
     def execution_context(self) -> ExecutionContext | None:
         return self._app.execution_context
 
     @property
-    def user_config(self) -> MarimoConfig:
-        return self._app.user_config
+    def marimo_config(self) -> MarimoConfig:
+        return get_default_config_manager(
+            current_path=self.filename
+        ).get_config()
 
     @property
     def cell_id(self) -> Optional[CellId_t]:
@@ -110,7 +125,9 @@ class ScriptRuntimeContext(RuntimeContext):
         return self._app
 
 
-def initialize_script_context(app: InternalApp, stream: Stream) -> None:
+def initialize_script_context(
+    app: InternalApp, stream: Stream, filename: str | None
+) -> None:
     """Initializes thread-local/session-specific context.
 
     Must be called exactly once for each client thread.
@@ -120,6 +137,7 @@ def initialize_script_context(app: InternalApp, stream: Stream) -> None:
     runtime_context = ScriptRuntimeContext(
         _app=app,
         ui_element_registry=UIElementRegistry(),
+        state_registry=StateRegistry(),
         function_registry=FunctionRegistry(),
         cell_lifecycle_registry=CellLifecycleRegistry(),
         virtual_file_registry=VirtualFileRegistry(),
@@ -129,5 +147,6 @@ def initialize_script_context(app: InternalApp, stream: Stream) -> None:
         stderr=None,
         children=[],
         parent=None,
+        filename=filename,
     )
     initialize_context(runtime_context=runtime_context)

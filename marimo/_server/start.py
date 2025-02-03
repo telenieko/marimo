@@ -8,7 +8,7 @@ from typing import Optional
 import uvicorn
 
 import marimo._server.api.lifespans as lifespans
-from marimo._config.manager import UserConfigManager
+from marimo._config.manager import get_default_config_manager
 from marimo._runtime.requests import SerializedCLIArgs
 from marimo._server.file_router import AppFileRouter
 from marimo._server.main import create_starlette_app
@@ -21,6 +21,7 @@ from marimo._server.utils import (
     initialize_fd_limit,
 )
 from marimo._server.uvicorn_utils import initialize_signals
+from marimo._tracer import LOGGER
 from marimo._utils.paths import import_files
 
 DEFAULT_PORT = 2718
@@ -71,6 +72,7 @@ def start(
     development_mode: bool,
     quiet: bool,
     include_code: bool,
+    ttl_seconds: Optional[int],
     headless: bool,
     port: Optional[int],
     host: str,
@@ -89,7 +91,32 @@ def start(
     # Find a free port if none is specified
     # if the user specifies a port, we don't try to find a free one
     port = port or find_free_port(DEFAULT_PORT)
-    user_config_mgr = UserConfigManager()
+    lsp_port = find_free_port(DEFAULT_PORT + 200)  # Add 200 to avoid conflicts
+
+    # This is the path that will be used to read the project configuration
+    start_path: Optional[str] = None
+    if (single_file := file_router.maybe_get_single_file()) is not None:
+        start_path = single_file.path
+    elif (directory := file_router.directory) is not None:
+        start_path = directory
+    else:
+        start_path = os.getcwd()
+
+    config_reader = get_default_config_manager(current_path=start_path)
+
+    # If watch is true, disable auto-save and format-on-save,
+    # watch is enabled when they are editing in another editor
+    if watch:
+        config_reader = config_reader.with_overrides(
+            {
+                "save": {
+                    "autosave": "off",
+                    "format_on_save": False,
+                    "autosave_delay": 1000,
+                }
+            }
+        )
+        LOGGER.info("Watch mode enabled, auto-save is disabled")
 
     session_manager = SessionManager(
         file_router=file_router,
@@ -97,11 +124,13 @@ def start(
         development_mode=development_mode,
         quiet=quiet,
         include_code=include_code,
-        lsp_server=LspServer(port * 10),
-        user_config_manager=user_config_mgr,
+        ttl_seconds=ttl_seconds,
+        lsp_server=LspServer(lsp_port),
+        user_config_manager=config_reader,
         cli_args=cli_args,
         auth_token=auth_token,
         redirect_console_to_browser=redirect_console_to_browser,
+        watch=watch,
     )
 
     log_level = "info" if development_mode else "error"
@@ -113,7 +142,6 @@ def start(
         lifespan=lifespans.Lifespans(
             [
                 lifespans.lsp,
-                lifespans.watcher,
                 lifespans.etc,
                 lifespans.signal_handler,
                 lifespans.logging,
@@ -122,16 +150,18 @@ def start(
         ),
         allow_origins=allow_origins,
         enable_auth=not AuthToken.is_empty(session_manager.auth_token),
+        lsp_port=lsp_port,
     )
 
     app.state.port = external_port
+    app.state.lsp_port = lsp_port
     app.state.host = external_host
 
     app.state.headless = headless
     app.state.watch = watch
     app.state.session_manager = session_manager
     app.state.base_url = base_url
-    app.state.config_manager = user_config_mgr
+    app.state.config_manager = config_reader
 
     # Resource initialization
     # Increase the limit on open file descriptors to prevent resource
@@ -168,6 +198,11 @@ def start(
             # close the websocket if we don't receive a pong after 60 seconds
             ws_ping_timeout=60,
             timeout_graceful_shutdown=1,
+            # Under uvloop, reading the socket we monitor under add_reader()
+            # occasionally throws BlockingIOError (errno 11, or errno 35,
+            # ...). RUN mode no longer uses a socket (it has no IPC) but EDIT
+            # does, so force asyncio.
+            loop="asyncio" if mode == SessionMode.EDIT else "auto",
         )
     )
     app.state.server = server

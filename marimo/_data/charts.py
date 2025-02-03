@@ -7,6 +7,7 @@ from textwrap import dedent
 from typing import Any, cast
 
 from marimo._data.models import DataType
+from marimo._utils import assert_never
 
 
 @abc.abstractmethod
@@ -276,7 +277,11 @@ def get_chart_builder(
         return WrapperChartBuilder(
             StringChartBuilder(should_limit_to_10_items)
         )
-    if column_type == "date":
+    if (
+        column_type == "date"
+        or column_type == "datetime"
+        or column_type == "time"
+    ):
         return WrapperChartBuilder(DateChartBuilder())
     if column_type == "boolean":
         return WrapperChartBuilder(BooleanChartBuilder())
@@ -284,6 +289,8 @@ def get_chart_builder(
         return WrapperChartBuilder(IntegerChartBuilder())
     if column_type == "unknown":
         return WrapperChartBuilder(UnknownChartBuilder())
+
+    assert_never(column_type)
 
 
 def _escape_special_path_characters(column: str | int) -> str:

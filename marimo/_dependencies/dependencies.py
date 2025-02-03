@@ -7,8 +7,6 @@ import shutil
 import sys
 from dataclasses import dataclass
 
-from packaging import version
-
 
 @dataclass
 class Dependency:
@@ -16,27 +14,46 @@ class Dependency:
     min_version: str | None = None
     max_version: str | None = None
 
-    def has(self) -> bool:
+    def has(self, quiet: bool = False) -> bool:
         """Return True if the dependency is installed."""
-        has_dep = importlib.util.find_spec(self.pkg) is not None
-        if not has_dep:
+        try:
+            has_dep = importlib.util.find_spec(self.pkg) is not None
+            if not has_dep:
+                return False
+        except (ModuleNotFoundError, importlib.metadata.PackageNotFoundError):
+            # Could happen for nested imports (e.g. foo.bar)
             return False
 
-        if self.min_version or self.max_version:
+        if not quiet and (self.min_version or self.max_version):
             self.warn_if_mismatch_version(self.min_version, self.max_version)
         return True
 
     def has_at_version(
-        self, *, min_version: str | None, max_version: str | None = None
+        self,
+        *,
+        min_version: str | None,
+        max_version: str | None = None,
+        quiet: bool = False,
     ) -> bool:
-        if not self.has():
+        if not self.has(quiet=quiet):
             return False
         return _version_check(
             pkg=self.pkg,
             v=self.get_version(),
             min_v=min_version,
             max_v=max_version,
+            quiet=quiet,
         )
+
+    def has_required_version(self, quiet: bool = False) -> bool:
+        return self.has_at_version(
+            min_version=self.min_version,
+            max_version=self.max_version,
+            quiet=quiet,
+        )
+
+    def imported(self) -> bool:
+        return self.pkg in sys.modules
 
     def require(self, why: str) -> None:
         """
@@ -47,10 +64,10 @@ class Dependency:
 
         """
         if not self.has():
-            raise ModuleNotFoundError(
-                f"{self.pkg} is required {why}. "
-                + f"You can install it with 'pip install {self.pkg}'."
-            ) from None
+            message = f"{self.pkg} is required {why}."
+            sys.stderr.write(message + "\n\n")
+            # Including the `name` helps with auto-installations
+            raise ModuleNotFoundError(message, name=self.pkg) from None
 
     def require_at_version(
         self,
@@ -70,7 +87,10 @@ class Dependency:
         )
 
     def get_version(self) -> str:
-        return importlib.metadata.version(self.pkg)
+        try:
+            return importlib.metadata.version(self.pkg)
+        except importlib.metadata.PackageNotFoundError:
+            return f"{__import__(self.pkg).__version__}"
 
     def warn_if_mismatch_version(
         self,
@@ -106,9 +126,12 @@ def _version_check(
     min_v: str | None = None,
     max_v: str | None = None,
     raise_error: bool = False,
+    quiet: bool = False,
 ) -> bool:
     if min_v is None and max_v is None:
         return True
+
+    from packaging import version
 
     parsed_min_version = version.parse(min_v) if min_v else None
     parsed_max_version = version.parse(max_v) if max_v else None
@@ -118,14 +141,16 @@ def _version_check(
         msg = f"Mismatched version of {pkg}: expected >={min_v}, got {v}"
         if raise_error:
             raise RuntimeError(msg)
-        sys.stderr.write(f"{msg}. Some features may not work correctly.")
+        if not quiet:
+            sys.stderr.write(f"{msg}. Some features may not work correctly.")
         return False
 
     if parsed_max_version is not None and parsed_v >= parsed_max_version:
         msg = f"Mismatched version of {pkg}: expected <{max_v}, got {v}"
         if raise_error:
             raise RuntimeError(msg)
-        sys.stderr.write(f"{msg}. Some features may not work correctly.")
+        if not quiet:
+            sys.stderr.write(f"{msg}. Some features may not work correctly.")
         return False
 
     return True
@@ -134,13 +159,17 @@ def _version_check(
 class DependencyManager:
     """Utilities for checking the status of dependencies."""
 
+    sympy = Dependency("sympy")
     pandas = Dependency("pandas")
     polars = Dependency("polars")
+    ibis = Dependency("ibis")
     numpy = Dependency("numpy")
     altair = Dependency("altair", min_version="5.3.0", max_version="6.0.0")
     duckdb = Dependency("duckdb")
+    sqlglot = Dependency("sqlglot")
     pillow = Dependency("PIL")
     plotly = Dependency("plotly")
+    bokeh = Dependency("bokeh")
     pyarrow = Dependency("pyarrow")
     openai = Dependency("openai")
     matplotlib = Dependency("matplotlib")
@@ -154,11 +183,28 @@ class DependencyManager:
     black = Dependency("black")
     geopandas = Dependency("geopandas")
     opentelemetry = Dependency("opentelemetry")
+    anthropic = Dependency("anthropic")
+    google_ai = Dependency("google.generativeai")
+    groq = Dependency("groq")
+    panel = Dependency("panel")
+    sqlalchemy = Dependency("sqlalchemy")
+
+    # Version requirements to properly support the new superfences introduced in
+    # pymdown#2470
+    new_superfences = Dependency("pymdownx", min_version="10.11.0")
 
     @staticmethod
     def has(pkg: str) -> bool:
         """Return True if any lib is installed."""
         return Dependency(pkg).has()
+
+    @staticmethod
+    def imported(pkg: str) -> bool:
+        """Return True if the lib has been imported.
+
+        Can be much faster than 'has'.
+        """
+        return Dependency(pkg).imported()
 
     @staticmethod
     def which(pkg: str) -> bool:

@@ -11,10 +11,11 @@ import {
 import type { ParentSchema } from "../rpc";
 import { Logger } from "../../../utils/Logger";
 import { TRANSPORT_ID } from "./constants";
-import { getPyodideVersion, importPyodide } from "./getPyodideVersion";
+import { getPyodideVersion } from "./getPyodideVersion";
 import type { SaveNotebookRequest } from "@/core/network/types";
 import { WasmFileSystem } from "./fs";
 import { getController } from "./getController";
+import { decodeUtf8 } from "@/utils/strings";
 
 /**
  * Web worker responsible for saving the notebook.
@@ -30,7 +31,6 @@ async function loadPyodideAndPackages() {
     // Import pyodide
     const marimoVersion = getMarimoVersion();
     const pyodideVersion = getPyodideVersion(marimoVersion);
-    await importPyodide(marimoVersion);
 
     // Bootstrap the controller
     const controller = await getController(marimoVersion);
@@ -59,7 +59,7 @@ const pyodideReadyPromise = loadPyodideAndPackages();
 const requestHandler = createRPCRequestHandler({
   readFile: async (filename: string) => {
     await pyodideReadyPromise; // Make sure loading is done
-    const file = self.pyodide.FS.readFile(filename, { encoding: "utf8" });
+    const file = decodeUtf8(self.pyodide.FS.readFile(filename));
     return file;
   },
   readNotebook: async () => {

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, List, Tuple
+from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Tuple
 
 from marimo import _loggers
 from marimo._ast.cell import (
@@ -11,12 +11,13 @@ from marimo._ast.cell import (
     CellImpl,
 )
 from marimo._ast.compiler import code_key
-from marimo._ast.visitor import Name, VariableData
+from marimo._ast.visitor import ImportData, Name, VariableData
 from marimo._runtime.executor import execute_cell, execute_cell_async
 from marimo._utils.variables import is_mangled_local
 
 if TYPE_CHECKING:
     from collections.abc import Collection
+
 
 Edge = Tuple[CellId_t, CellId_t]
 # EdgeWithVar uses a list rather than a set for the variables linking the cells
@@ -69,6 +70,7 @@ class DirectedGraph:
             cell_id in self.cells and code_key(code) == self.cells[cell_id].key
         )
 
+    # TODO: language type?
     def get_defining_cells(self, name: Name) -> set[CellId_t]:
         """Get all cells that define name.
 
@@ -76,9 +78,24 @@ class DirectedGraph:
         """
         return self.definitions[name]
 
-    def get_referring_cells(self, name: Name) -> set[CellId_t]:
-        """Get all cells that have a ref to `name`."""
-        return set([cid for cid in self.cells if name in self.cells[cid].refs])
+    def get_referring_cells(
+        self, name: Name, language: Literal["python", "sql"]
+    ) -> set[CellId_t]:
+        """Get all cells that have a ref to `name`.
+
+        The variable can be either a Python variable or a SQL variable (table).
+        """
+        children = set()
+        for cid, cell in self.cells.items():
+            if name not in cell.refs:
+                continue
+            elif language == "sql" and cell.language == "python":
+                # SQL variables don't leak to Python cells, but
+                # Python variables do leak to SQL cells
+                continue
+            children.add(cid)
+
+        return children
 
     def get_path(self, source: CellId_t, dst: CellId_t) -> list[Edge]:
         """Get a path from `source` to `dst`, if any."""
@@ -123,18 +140,20 @@ class DirectedGraph:
             self.children[cell_id] = children
             self.siblings[cell_id] = siblings
             self.parents[cell_id] = parents
-            for name in cell.defs:
+            for name, variable_data in cell.variable_data.items():
                 self.definitions.setdefault(name, set()).add(cell_id)
                 for sibling in self.definitions[name]:
+                    # TODO(akshayka): Distinguish between Python/SQL?
                     if sibling != cell_id:
                         siblings.add(sibling)
                         self.siblings[sibling].add(cell_id)
 
                 # a cell can refer to its own defs, but that doesn't add an
                 # edge to the dependency graph
-                referring_cells = self.get_referring_cells(name) - set(
-                    (cell_id,)
-                )
+                referring_cells = self.get_referring_cells(
+                    name,
+                    language=variable_data[-1].language,
+                ) - set((cell_id,))
                 # we will add an edge (cell_id, v) for each v in
                 # referring_cells; if there is a path from v to cell_id, then
                 # the new edge will form a cycle
@@ -148,7 +167,7 @@ class DirectedGraph:
                     self.parents[child].add(cell_id)
 
             for name in cell.refs:
-                other_ids = (
+                other_ids_defining_name = (
                     self.definitions[name]
                     if name in self.definitions
                     else set()
@@ -156,7 +175,13 @@ class DirectedGraph:
                 # if other is empty, this means that the user is going to
                 # get a NameError once the cell is run, unless the symbol
                 # is say a builtin
-                for other_id in other_ids:
+                for other_id in other_ids_defining_name:
+                    language = (
+                        self.cells[other_id].variable_data[name][-1].language
+                    )
+                    if language == "sql" and cell.language == "python":
+                        # SQL table/db def -> Python ref is not an edge
+                        continue
                     parents.add(other_id)
                     # we are adding an edge (other_id, cell_id). If there
                     # is a path from cell_id to other_id, then the new
@@ -292,6 +317,18 @@ class DirectedGraph:
                     queue.append(parent_id)
         return False
 
+    def get_imports(
+        self, cell_id: Optional[CellId_t] = None
+    ) -> dict[Name, ImportData]:
+        imports = {}
+        cells = (
+            self.cells.values() if cell_id is None else [self.cells[cell_id]]
+        )
+        for cell in cells:
+            for imported in cell.imports:
+                imports[imported.definition] = imported
+        return imports
+
     def get_multiply_defined(self) -> list[Name]:
         names = []
         for name, definers in self.definitions.items():
@@ -381,8 +418,9 @@ def transitive_closure(
     cell_ids: set[CellId_t],
     children: bool = True,
     inclusive: bool = True,
-    relatives: Callable[[DirectedGraph, CellId_t, bool], set[CellId_t]]
-    | None = None,
+    relatives: (
+        Callable[[DirectedGraph, CellId_t, bool], set[CellId_t]] | None
+    ) = None,
     predicate: Callable[[CellImpl], bool] | None = None,
 ) -> set[CellId_t]:
     """Return a set of the passed-in cells and their descendants or ancestors
@@ -451,18 +489,36 @@ def get_cycles(
 def topological_sort(
     graph: DirectedGraph, cell_ids: Collection[CellId_t]
 ) -> list[CellId_t]:
-    """Sort `cell_ids` in a topological order."""
+    """Sort `cell_ids` in a topological order using a heap queue.
+
+    When multiple cells have the same parents (including no parents), the tie is broken by
+    registration order - cells registered earlier are processed first.
+    """
+    from heapq import heappop, heappush
+
     parents, children = induced_subgraph(graph, cell_ids)
-    roots = [cid for cid in cell_ids if not parents[cid]]
-    sorted_cell_ids = []
-    while roots:
-        cid = roots.pop(0)
+    # Use registration order as tiebreaker
+    top_down_keys = {
+        key: index for index, key in enumerate(graph.cells.keys())
+    }
+
+    # Initialize heap with roots (nodes with no parents)
+    heap: list[tuple[int, CellId_t]] = []
+    for cid in cell_ids:
+        if not parents[cid]:
+            # Use tuple with registration order as first element for heap ordering
+            heappush(heap, (top_down_keys[cid], cid))
+
+    sorted_cell_ids: list[CellId_t] = []
+    while heap:
+        _, cid = heappop(heap)
         sorted_cell_ids.append(cid)
+
         for child in children[cid]:
             parents[child].remove(cid)
             if not parents[child]:
-                roots.append(child)
-    # TODO make sure parents for each id is empty, otherwise cycle
+                heappush(heap, (top_down_keys[child], child))
+
     return sorted_cell_ids
 
 
@@ -482,7 +538,10 @@ def import_block_relatives(
     # definitions used to find the descendants of this cell.
     unimported_defs = cell.defs - cell.import_workspace.imported_defs
     children_ids = set().union(
-        *[graph.get_referring_cells(name) for name in unimported_defs]
+        *[
+            graph.get_referring_cells(name, language="python")
+            for name in unimported_defs
+        ]
     )
 
     # If children haven't been executed, then still use imported defs;
@@ -490,7 +549,7 @@ def import_block_relatives(
     # exception or user interrupt, so that a module is imported but the
     # cell's children haven't run.
     for name in cell.import_workspace.imported_defs:
-        for child_id in graph.get_referring_cells(name):
+        for child_id in graph.get_referring_cells(name, language="python"):
             if graph.cells[child_id].run_result_status in (
                 "interrupted",
                 "cancelled",
@@ -542,7 +601,7 @@ class Runner:
     ) -> set[CellId_t]:
         # Get the transitive closure of parents defining unsubstituted refs
         graph = self._graph
-        substitutions = set(kwargs.values())
+        substitutions = set(kwargs.keys())
         unsubstituted_refs = cell_impl.refs - substitutions
         parent_ids = set(
             [
@@ -558,7 +617,7 @@ class Runner:
         for argname in kwargs:
             if argname not in cell_impl.refs:
                 raise ValueError(
-                    f"Cell got unexpected argument {argname}"
+                    f"Cell got unexpected argument {argname}; "
                     f"The allowed arguments are {cell_impl.refs}."
                 )
 

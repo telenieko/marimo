@@ -1,9 +1,5 @@
 /* Copyright 2024 Marimo. All rights reserved. */
-import {
-  kioskModeAtom,
-  runDuringPresentMode,
-  viewStateAtom,
-} from "@/core/mode";
+import { kioskModeAtom, viewStateAtom } from "@/core/mode";
 import { downloadBlob, downloadHTMLAsImage } from "@/utils/download";
 import { useAtom, useAtomValue, useSetAtom } from "jotai";
 import {
@@ -29,14 +25,21 @@ import {
   PresentationIcon,
   EditIcon,
   LayoutTemplateIcon,
+  Files,
+  SettingsIcon,
+  XCircleIcon,
+  FilePlus2Icon,
+  FastForwardIcon,
 } from "lucide-react";
 import { commandPaletteAtom } from "../controls/command-palette";
-import { useCellActions, useNotebook } from "@/core/cells/cells";
 import {
-  canUndoDeletes,
-  disabledCellIds,
-  enabledCellIds,
-} from "@/core/cells/utils";
+  canUndoDeletesAtom,
+  getNotebook,
+  hasDisabledCellsAtom,
+  hasEnabledCellsAtom,
+  useCellActions,
+} from "@/core/cells/cells";
+import { disabledCellIds, enabledCellIds } from "@/core/cells/utils";
 import {
   exportAsMarkdown,
   readCode,
@@ -61,6 +64,13 @@ import { LAYOUT_TYPES } from "../renderers/types";
 import { displayLayoutName, getLayoutIcon } from "../renderers/layout-select";
 import { useLayoutState, useLayoutActions } from "@/core/layout/layout";
 import { useTogglePresenting } from "@/core/layout/useTogglePresenting";
+import { useCopyNotebook } from "./useCopyNotebook";
+import { isWasm } from "@/core/wasm/utils";
+import { settingDialogAtom } from "@/components/app-config/app-config-button";
+import { renderShortcut } from "@/components/shortcuts/renderShortcut";
+import { copyToClipboard } from "@/utils/copy";
+import { newNotebookURL } from "@/utils/urls";
+import { useRunAllCells } from "../cell/useRunCells";
 
 const NOOP_HANDLER = (event?: Event) => {
   event?.preventDefault();
@@ -68,24 +78,34 @@ const NOOP_HANDLER = (event?: Event) => {
 };
 
 export function useNotebookActions() {
-  const [filename] = useFilename();
+  const filename = useFilename();
   const { openModal, closeModal } = useImperativeModal();
   const { openApplication } = useChromeActions();
   const { selectedPanel } = useChromeState();
   const [viewState] = useAtom(viewStateAtom);
   const kioskMode = useAtomValue(kioskModeAtom);
 
-  const notebook = useNotebook();
-  const { updateCellConfig, undoDeleteCell } = useCellActions();
+  const { updateCellConfig, undoDeleteCell, clearAllCellOutputs } =
+    useCellActions();
   const restartKernel = useRestartKernel();
+  const runAllCells = useRunAllCells();
+  const copyNotebook = useCopyNotebook(filename);
   const setCommandPaletteOpen = useSetAtom(commandPaletteAtom);
+  const setSettingsDialogOpen = useSetAtom(settingDialogAtom);
   const setKeyboardShortcutsOpen = useSetAtom(keyboardShortcutsAtom);
 
-  const disabledCells = disabledCellIds(notebook);
-  const enabledCells = enabledCellIds(notebook);
+  const hasDisabledCells = useAtomValue(hasDisabledCellsAtom);
+  const hasEnabledCells = useAtomValue(hasEnabledCellsAtom);
+  const canUndoDeletes = useAtomValue(canUndoDeletesAtom);
   const { selectedLayout } = useLayoutState();
   const { setLayoutView } = useLayoutActions();
   const togglePresenting = useTogglePresenting();
+
+  const renderCheckboxElement = (checked: boolean) => (
+    <div className="w-8 flex justify-end">
+      {checked && <CheckIcon size={14} />}
+    </div>
+  );
 
   const actions: ActionButton[] = [
     {
@@ -106,7 +126,7 @@ export function useNotebookActions() {
           handle: async () => {
             const code = await readCode();
             const url = createShareableLink({ code: code.contents });
-            window.navigator.clipboard.writeText(url);
+            await copyToClipboard(url);
             toast({
               title: "Copied",
               description: "Link copied to clipboard.",
@@ -132,56 +152,22 @@ export function useNotebookActions() {
               });
               return;
             }
-            await downloadAsHTML({ filename });
+            await downloadAsHTML({ filename, includeCode: true });
           },
         },
         {
-          icon: <ImageIcon size={14} strokeWidth={1.5} />,
-          label: "Download as PNG",
+          icon: <FolderDownIcon size={14} strokeWidth={1.5} />,
+          label: "Download as HTML (exclude code)",
           handle: async () => {
-            const toasted = toast({
-              title: "Starting download",
-              description: "Downloading as PNG...",
-            });
-
-            await runDuringPresentMode(async () => {
-              const app = document.getElementById("App");
-              if (!app) {
-                return;
-              }
-
-              // Wait 3 seconds for the app to render
-              await new Promise((resolve) => setTimeout(resolve, 3000));
-
-              await downloadHTMLAsImage(app, document.title);
-            });
-
-            toasted.dismiss();
-          },
-        },
-        {
-          icon: <FileIcon size={14} strokeWidth={1.5} />,
-          label: "Print PDF",
-          handle: async () => {
-            const toasted = toast({
-              title: "Starting download",
-              description: "Downloading as PDF...",
-            });
-
-            await runDuringPresentMode(async () => {
-              // Wait 3 seconds for the app to render
-              await new Promise((resolve) => setTimeout(resolve, 3000));
-              toasted.dismiss();
-
-              const beforeprint = new Event("export-beforeprint");
-              const afterprint = new Event("export-afterprint");
-              function print() {
-                window.dispatchEvent(beforeprint);
-                setTimeout(() => window.print(), 0);
-                setTimeout(() => window.dispatchEvent(afterprint), 0);
-              }
-              print();
-            });
+            if (!filename) {
+              toast({
+                variant: "danger",
+                title: "Error",
+                description: "Notebooks must be named to be exported.",
+              });
+              return;
+            }
+            await downloadAsHTML({ filename, includeCode: false });
           },
         },
         {
@@ -208,6 +194,48 @@ export function useNotebookActions() {
             );
           },
         },
+        {
+          divider: true,
+          icon: <ImageIcon size={14} strokeWidth={1.5} />,
+          label: "Download as PNG",
+          disabled: viewState.mode !== "present",
+          tooltip:
+            viewState.mode === "present" ? undefined : (
+              <span>
+                Only available in app view. <br />
+                Toggle with: {renderShortcut("global.hideCode", false)}
+              </span>
+            ),
+          handle: async () => {
+            const app = document.getElementById("App");
+            if (!app) {
+              return;
+            }
+            await downloadHTMLAsImage(app, document.title);
+          },
+        },
+        {
+          icon: <FileIcon size={14} strokeWidth={1.5} />,
+          label: "Download as PDF",
+          disabled: viewState.mode !== "present",
+          tooltip:
+            viewState.mode === "present" ? undefined : (
+              <span>
+                Only available in app view. <br />
+                Toggle with: {renderShortcut("global.hideCode", false)}
+              </span>
+            ),
+          handle: async () => {
+            const beforeprint = new Event("export-beforeprint");
+            const afterprint = new Event("export-afterprint");
+            function print() {
+              window.dispatchEvent(beforeprint);
+              setTimeout(() => window.print(), 0);
+              setTimeout(() => window.dispatchEvent(afterprint), 0);
+            }
+            print();
+          },
+        },
       ],
     },
 
@@ -222,11 +250,7 @@ export function useNotebookActions() {
         }
         return {
           label: startCase(type),
-          rightElement: (
-            <div className="w-8 flex justify-end">
-              {selectedPanel === type && <CheckIcon size={14} />}
-            </div>
-          ),
+          rightElement: renderCheckboxElement(selectedPanel === type),
           icon: <Icon size={14} strokeWidth={1.5} />,
           handle: () => openApplication(type),
         };
@@ -275,25 +299,31 @@ export function useNotebookActions() {
     },
 
     {
+      icon: <Files size={14} strokeWidth={1.5} />,
+      label: "Create notebook copy",
+      hidden: !filename || isWasm(),
+      handle: copyNotebook,
+    },
+    {
       icon: <ClipboardCopyIcon size={14} strokeWidth={1.5} />,
       label: "Copy code to clipboard",
       hidden: !filename,
       handle: async () => {
         const code = await readCode();
-        navigator.clipboard.writeText(code.contents);
+        await copyToClipboard(code.contents);
         toast({
           title: "Copied",
           description: "Code copied to clipboard.",
         });
       },
     },
-
     {
       icon: <ZapIcon size={14} strokeWidth={1.5} />,
       label: "Enable all cells",
-      hidden: disabledCells.length === 0 || kioskMode,
+      hidden: !hasDisabledCells || kioskMode,
       handle: async () => {
-        const ids = disabledCells.map((cell) => cell.id);
+        const notebook = getNotebook();
+        const ids = disabledCellIds(notebook);
         const newConfigs = Objects.fromEntries(
           ids.map((cellId) => [cellId, { disabled: false }]),
         );
@@ -308,9 +338,10 @@ export function useNotebookActions() {
     {
       icon: <ZapOffIcon size={14} strokeWidth={1.5} />,
       label: "Disable all cells",
-      hidden: enabledCells.length === 0 || kioskMode,
+      hidden: !hasEnabledCells || kioskMode,
       handle: async () => {
-        const ids = enabledCells.map((cell) => cell.id);
+        const notebook = getNotebook();
+        const ids = enabledCellIds(notebook);
         const newConfigs = Objects.fromEntries(
           ids.map((cellId) => [cellId, { disabled: true }]),
         );
@@ -323,9 +354,24 @@ export function useNotebookActions() {
       },
     },
     {
+      icon: <XCircleIcon size={14} strokeWidth={1.5} />,
+      label: "Clear all outputs",
+      handle: () => {
+        clearAllCellOutputs();
+      },
+    },
+    {
+      icon: <FastForwardIcon size={14} strokeWidth={1.5} />,
+      label: "Re-run all cells",
+      hotkey: "global.runAll",
+      handle: async () => {
+        runAllCells();
+      },
+    },
+    {
       icon: <Undo2Icon size={14} strokeWidth={1.5} />,
       label: "Undo cell deletion",
-      hidden: !canUndoDeletes(notebook) || kioskMode,
+      hidden: !canUndoDeletes || kioskMode,
       handle: () => {
         undoDeleteCell();
       },
@@ -337,6 +383,12 @@ export function useNotebookActions() {
       label: "Command palette",
       hotkey: "global.commandPalette",
       handle: () => setCommandPaletteOpen((open) => !open),
+    },
+
+    {
+      icon: <SettingsIcon size={14} strokeWidth={1.5} />,
+      label: "User settings",
+      handle: () => setSettingsDialogOpen((open) => !open),
     },
 
     {
@@ -358,9 +410,24 @@ export function useNotebookActions() {
       divider: true,
       icon: <Home size={14} strokeWidth={1.5} />,
       label: "Return home",
+      // If file is in the url, then we ran `marimo edit`
+      // without a specific file
       hidden: !location.search.includes("file"),
       handle: () => {
-        window.location.href = document.baseURI;
+        const withoutSearch = document.baseURI.split("?")[0];
+        window.open(withoutSearch, "_self");
+      },
+    },
+
+    {
+      icon: <FilePlus2Icon size={14} strokeWidth={1.5} />,
+      label: "New notebook",
+      // If file is in the url, then we ran `marimo edit`
+      // without a specific file
+      hidden: !location.search.includes("file"),
+      handle: () => {
+        const url = newNotebookURL();
+        window.open(url, "_blank");
       },
     },
 

@@ -1,4 +1,5 @@
-# Custom UI elements
+
+# Building custom UI elements
 
 Build custom UI plugins that hook into marimo's reactive
 execution engine by using [anywidget](https://anywidget.dev/).
@@ -31,7 +32,7 @@ widget.data_as_polars
 ```
 
 For additional examples, see
-[our repo](https://github.com/marimo-team/marimo/tree/main/examples/anywidget).
+[our repo](https://github.com/marimo-team/marimo/tree/main/examples/third_party/anywidget).
 
 ## Custom widget
 
@@ -86,9 +87,4 @@ widget.count
 
 ---
 
-```{eval-rst}
-.. autoclass:: marimo.ui.anywidget
-  :members:
-
-  .. autoclasstoc:: marimo._plugins.ui._impl.from_anywidget.anywidget
-```
+::: marimo.ui.anywidget

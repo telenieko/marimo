@@ -1,15 +1,18 @@
 # Copyright 2024 Marimo. All rights reserved.
 from __future__ import annotations
 
-import random
-import string
-from dataclasses import asdict, dataclass
+import ast
+import inspect
+from dataclasses import asdict, dataclass, field
+from textwrap import dedent
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
     Iterable,
     Iterator,
+    List,
+    Literal,
     Mapping,
     Optional,
 )
@@ -17,15 +20,14 @@ from uuid import uuid4
 
 from marimo import _loggers
 from marimo._ast.cell import Cell, CellConfig, CellId_t
-from marimo._ast.compiler import cell_factory
+from marimo._ast.cell_manager import CellManager
 from marimo._ast.errors import (
     CycleError,
     DeleteNonlocalError,
     MultipleDefinitionError,
     UnparsableError,
 )
-from marimo._config.config import MarimoConfig, WidthType
-from marimo._config.utils import load_config
+from marimo._config.config import WidthType
 from marimo._messaging.mimetypes import KnownMimeType
 from marimo._output.hypertext import Html
 from marimo._output.rich_help import mddoc
@@ -68,6 +70,14 @@ class _AppConfig:
     # CSS file, relative to the app file
     css_file: Optional[str] = None
 
+    # HTML head file, relative to the app file
+    html_head_file: Optional[str] = None
+
+    # Whether to automatically download the app as HTML and Markdown
+    auto_download: List[Literal["html", "markdown"]] = field(
+        default_factory=list
+    )
+
     @staticmethod
     def from_untrusted_dict(updates: dict[str, Any]) -> _AppConfig:
         config = _AppConfig()
@@ -90,22 +100,6 @@ class _AppConfig:
                 self.__setattr__(key, updates[key])
 
         return self
-
-
-@dataclass
-class CellData:
-    """A cell together with some metadata"""
-
-    cell_id: CellId_t
-    # User code comprising the cell
-    code: str
-    # User-provided name for cell (or default)
-    name: str
-    # Cell config
-    config: CellConfig
-
-    # The original cell, or None if cell was not parsable
-    cell: Optional[Cell]
 
 
 class _Namespace(Mapping[str, object]):
@@ -148,8 +142,7 @@ class App:
         # Take `AppConfig` as kwargs for forward/backward compatibility;
         # unrecognized settings will just be dropped, instead of raising
         # a TypeError.
-        self._config = _AppConfig.from_untrusted_dict(kwargs)
-        self._user_config = load_config()
+        self._config: _AppConfig = _AppConfig.from_untrusted_dict(kwargs)
 
         if runtime_context_installed():
             # nested applications get a unique cell prefix to disambiguate
@@ -164,24 +157,34 @@ class App:
         self._execution_context: ExecutionContext | None = None
         self._runner = dataflow.Runner(self._graph)
 
+        self._unparsable_code: list[str] = []
         self._unparsable = False
         self._initialized = False
         # injection hook set by contexts like tests such that script traces are
         # deterministic and not dependent on the test itself.
         # Set as a private attribute as not to pollute AppConfig or kwargs.
         self._anonymous_file = False
+        # injection hook to rewrite cells for pytest
+        self._pytest_rewrite = False
 
+        # Filename is derived from the callsite of the app
+        self._filename: str | None = None
+        try:
+            self._filename = inspect.getfile(inspect.stack()[1].frame)
+        except Exception:
+            ...
         self._app_kernel_runner: AppKernelRunner | None = None
 
     def cell(
         self,
         func: Callable[..., Any] | None = None,
         *,
+        column: Optional[int] = None,
         disabled: bool = False,
         hide_code: bool = False,
         **kwargs: Any,
     ) -> Cell | Callable[[Callable[..., Any]], Cell]:
-        """A decorator to add a cell to the app
+        """A decorator to add a cell to the app.
 
         This decorator can be called with or without parentheses. Each of the
         following is valid:
@@ -201,14 +204,16 @@ class App:
         ```
 
         Args:
-        - func: The decorated function
-        - disabled: Whether to disable the cell
-        - kwargs: For forward-compatibility with future arguments
+            func: The decorated function.
+            column: The column number to place this cell in.
+            disabled: Whether to disable the cell.
+            hide_code: Whether to hide the cell's code.
+            **kwargs: For forward-compatibility with future arguments.
         """
         del kwargs
 
         return self._cell_manager.cell_decorator(
-            func, disabled, hide_code, app=InternalApp(self)
+            func, column, disabled, hide_code, app=InternalApp(self)
         )
 
     def _unparsable_cell(
@@ -222,14 +227,30 @@ class App:
             name,
             CellConfig.from_dict(config),
         )
+        self._unparsable_code.append(code)
         self._unparsable = True
 
     def _maybe_initialize(self) -> None:
         if self._unparsable:
+            errors: list[str] = []
+            for code in self._unparsable_code:
+                try:
+                    ast.parse(dedent(code))
+                except SyntaxError as e:
+                    error_line = e.text
+                    error_marker: str = (
+                        " " * (e.offset - 1) + "^"
+                        if e.offset is not None
+                        else ""
+                    )
+                    err = f"{error_line}{error_marker}\n{e.msg}"
+                    errors.append(err)
+            syntax_errors = "\n-----\n".join(errors)
+
             raise UnparsableError(
-                "This notebook has cells with syntax errors, "
-                "so it cannot be initialized."
-            )
+                f"The notebook '{self._filename}' has cells with syntax errors, "
+                + f"so it cannot be initialized:\n {syntax_errors}"
+            ) from None
 
         if self._initialized:
             return
@@ -288,7 +309,9 @@ class App:
         self,
     ) -> tuple[Sequence[Any], Mapping[str, Any]]:
         self._maybe_initialize()
-        outputs, glbls = AppScriptRunner(InternalApp(self)).run()
+        outputs, glbls = AppScriptRunner(
+            InternalApp(self), filename=self._filename
+        ).run()
         return (self._flatten_outputs(outputs), self._globals_to_defs(glbls))
 
     async def _run_cell_async(
@@ -326,45 +349,45 @@ class App:
         The `embed` method lets you embed the output of a notebook
         into another notebook and access the values of its variables.
 
-        **Example.**
+        Returns:
+            An object `result` with two attributes: `result.output` (visual
+            output of the notebook) and `result.defs` (a dictionary mapping
+            variable names defined by the notebook to their values).
 
-        ```python
-        from my_notebook import app
-        ```
+        Example:
+            ```python
+            from my_notebook import app
+            ```
 
-        ```python
-        # execute the notebook
-        result = await app.embed()
-        ```
+            ```python
+            # execute the notebook; app.embed() can't be called in the cell
+            # that imported it!
+            result = await app.embed()
+            ```
 
-        ```python
-        # view the notebook's visual output
-        result.output
-        ```
+            ```python
+            # view the notebook's visual output
+            result.output
+            ```
 
-        ```python
-        # access the notebook's defined variables
-        result.defs
-        ```
+            ```python
+            # access the notebook's defined variables
+            result.defs
+            ```
 
-        Running `await app.embed()` executes the notebook and results an object
-        encapsulating the notebook visual output and its definitions.
+            Running `await app.embed()` executes the notebook and results an object
+            encapsulating the notebook visual output and its definitions.
 
-        Embedded notebook outputs are interactive: when you interact with
-        UI elements in an embedded notebook's output, any cell referring
-        to the `app` object is marked for execution, and its internal state
-        is automatically updated. This lets you use notebooks as building
-        blocks or components to create higher-level notebooks.
+            Embedded notebook outputs are interactive: when you interact with
+            UI elements in an embedded notebook's output, any cell referring
+            to the `app` object other than the one that imported it is marked for
+            execution, and its internal state is automatically updated. This lets
+            you use notebooks as building blocks or components to create
+            higher-level notebooks.
 
-        Multiple levels of nesting are supported: it's possible to embed a
-        notebook that in turn embeds another notebook, and marimo will do the
-        right thing.
-
-        **Returns.**
-
-        - An object `result` with two attributes: `result.output` (visual
-          output of the notebook) and `result.defs` (a dictionary mapping
-          variable names defined by the notebook to their values).
+            Multiple levels of nesting are supported: it's possible to embed a
+            notebook that in turn embeds another notebook, and marimo will do the
+            right thing.
         """
         from marimo._plugins.stateless.flex import vstack
         from marimo._runtime.context.utils import running_in_notebook
@@ -372,6 +395,8 @@ class App:
         self._maybe_initialize()
 
         if running_in_notebook():
+            # TODO(akshayka): raise a RuntimeError if called in the cell
+            # that defined the name bound to this App, if any
             app_kernel_runner = self._get_kernel_runner()
 
             if not app_kernel_runner.outputs:
@@ -401,166 +426,6 @@ class App:
             )
 
 
-class CellManager:
-    """
-    A manager for cells.
-
-    This holds the cells that have been registered with the app, and
-    provides methods to access them.
-    """
-
-    def __init__(self, prefix: str = "") -> None:
-        self._cell_data: dict[CellId_t, CellData] = {}
-        self.prefix = prefix
-        self.unparsable = False
-        self.random_seed = random.Random(42)
-
-    def create_cell_id(self) -> CellId_t:
-        # 4 random letters
-        return self.prefix + "".join(
-            self.random_seed.choices(string.ascii_letters, k=4)
-        )
-
-    def cell_decorator(
-        self,
-        func: Callable[..., Any] | None,
-        disabled: bool,
-        hide_code: bool,
-        app: InternalApp | None = None,
-    ) -> Cell | Callable[..., Cell]:
-        cell_config = CellConfig(disabled=disabled, hide_code=hide_code)
-
-        def _register(func: Callable[..., Any]) -> Cell:
-            cell = cell_factory(
-                func,
-                cell_id=self.create_cell_id(),
-                anonymous_file=app._app._anonymous_file if app else False,
-            )
-            cell._cell.configure(cell_config)
-            self._register_cell(cell, app=app)
-            return cell
-
-        if func is None:
-            # If the decorator was used with parentheses, func will be None,
-            # and we return a decorator that takes the decorated function as an
-            # argument
-            def decorator(func: Callable[..., Any]) -> Cell:
-                return _register(func)
-
-            return decorator
-        else:
-            return _register(func)
-
-    def _register_cell(
-        self, cell: Cell, app: InternalApp | None = None
-    ) -> None:
-        if app is not None:
-            cell._register_app(app)
-        cell_impl = cell._cell
-        self.register_cell(
-            cell_id=cell_impl.cell_id,
-            code=cell_impl.code,
-            name=cell.name,
-            config=cell_impl.config,
-            cell=cell,
-        )
-
-    def register_cell(
-        self,
-        cell_id: Optional[CellId_t],
-        code: str,
-        config: Optional[CellConfig],
-        name: str = "__",
-        cell: Optional[Cell] = None,
-    ) -> None:
-        if cell_id is None:
-            cell_id = self.create_cell_id()
-
-        self._cell_data[cell_id] = CellData(
-            cell_id=cell_id,
-            code=code,
-            name=name,
-            config=config or CellConfig(),
-            cell=cell,
-        )
-
-    def register_unparsable_cell(
-        self,
-        code: str,
-        name: Optional[str],
-        cell_config: CellConfig,
-    ) -> None:
-        # - code.split("\n")[1:-1] disregards first and last lines, which are
-        #   empty
-        # - line[4:] removes leading indent in multiline string
-        # - replace(...) unescapes double quotes
-        # - rstrip() removes an extra newline
-        code = "\n".join(
-            [line[4:].replace('\\"', '"') for line in code.split("\n")[1:-1]]
-        )
-
-        self.register_cell(
-            cell_id=self.create_cell_id(),
-            code=code,
-            config=cell_config,
-            name=name or "__",
-            cell=None,
-        )
-
-    def names(self) -> Iterable[str]:
-        for cell_data in self._cell_data.values():
-            yield cell_data.name
-
-    def codes(self) -> Iterable[str]:
-        for cell_data in self._cell_data.values():
-            yield cell_data.code
-
-    def configs(self) -> Iterable[CellConfig]:
-        for cell_data in self._cell_data.values():
-            yield cell_data.config
-
-    def valid_cells(
-        self,
-    ) -> Iterable[tuple[CellId_t, Cell]]:
-        """Return cells and functions for each valid cell."""
-        for cell_data in self._cell_data.values():
-            if cell_data.cell is not None:
-                yield (cell_data.cell_id, cell_data.cell)
-
-    def valid_cell_ids(self) -> Iterable[CellId_t]:
-        for cell_data in self._cell_data.values():
-            if cell_data.cell is not None:
-                yield cell_data.cell_id
-
-    def cell_ids(self) -> Iterable[CellId_t]:
-        """Cell IDs in the order they were registered."""
-        return self._cell_data.keys()
-
-    def cells(
-        self,
-    ) -> Iterable[Optional[Cell]]:
-        for cell_data in self._cell_data.values():
-            yield cell_data.cell
-
-    def config_map(self) -> dict[CellId_t, CellConfig]:
-        return {cid: cd.config for cid, cd in self._cell_data.items()}
-
-    def cell_data(self) -> Iterable[CellData]:
-        return self._cell_data.values()
-
-    def cell_data_at(self, cell_id: CellId_t) -> CellData:
-        return self._cell_data[cell_id]
-
-    def get_cell_id_by_code(self, code: str) -> Optional[CellId_t]:
-        """
-        Finds the first cell with the given code and returns its cell ID.
-        """
-        for cell_id, cell_data in self._cell_data.items():
-            if cell_data.code == code:
-                return cell_id
-        return None
-
-
 class InternalApp:
     """
     Internal representation of an app.
@@ -575,10 +440,6 @@ class InternalApp:
     @property
     def config(self) -> _AppConfig:
         return self._app._config
-
-    @property
-    def user_config(self) -> MarimoConfig:
-        return self._app._user_config
 
     @property
     def cell_manager(self) -> CellManager:

@@ -30,6 +30,12 @@ import { sendComponentValues } from "../network/requests";
 import type { RequestId } from "../network/DeferredRequestRegistry";
 import { UI_ELEMENT_REGISTRY } from "../dom/uiregistry";
 import type { UIElementId } from "../cells/ids";
+import { MarimoValueInputEvent } from "../dom/events";
+import {
+  shouldShowIslandsWarningIndicatorAtom,
+  userTriedToInteractWithIslandsAtom,
+} from "./state";
+import { dismissIslandsLoadingToast, toastIslandsLoading } from "./toast";
 
 /**
  * Main entry point for the js bundle for embedded marimo apps.
@@ -42,7 +48,7 @@ export async function initialize() {
   // This will display all the static HTML content.
   initializePlugins();
 
-  // Add 'marimo' class name to all `marimo-island` elements.
+  // Find all `marimo-island` elements.
   const islands = document.querySelectorAll<HTMLElement>(
     MarimoIslandElement.tagName,
   );
@@ -52,12 +58,33 @@ export async function initialize() {
     return;
   }
 
+  // Add 'marimo' class name to all `marimo-island` elements.
+  // This makes our styles apply to the islands.
   for (const island of islands) {
     island.classList.add(MarimoIslandElement.styleNamespace);
   }
 
   const actions = createNotebookActions((action) => {
     store.set(notebookAtom, (state) => notebookReducer(state, action));
+  });
+
+  // If the user has interacted with the islands before they are initialized,
+  // we show the loading toast.
+  store.sub(shouldShowIslandsWarningIndicatorAtom, () => {
+    const showing = store.get(shouldShowIslandsWarningIndicatorAtom);
+    if (showing) {
+      toastIslandsLoading();
+      // For each island, set the opacity to 0.5
+      for (const island of islands) {
+        island.style.setProperty("opacity", "0.5");
+      }
+    } else {
+      dismissIslandsLoadingToast();
+      // For each island, remove the opacity
+      for (const island of islands) {
+        island.style.removeProperty("opacity");
+      }
+    }
   });
 
   // Consume messages from the kernel
@@ -76,6 +103,7 @@ export async function initialize() {
       case "variable-values":
       case "data-column-preview":
       case "datasets":
+      case "data-source-connections":
         // Unsupported
         return;
       case "kernel-ready":
@@ -143,6 +171,18 @@ export async function initialize() {
         logNever(msg);
     }
   });
+
+  // Set the user tried to interact with islands
+  // before they are initialized.
+  document.addEventListener(
+    MarimoValueInputEvent.TYPE,
+    () => {
+      store.set(userTriedToInteractWithIslandsAtom, true);
+    },
+    {
+      once: true,
+    },
+  );
 
   // Start the runtime
   RuntimeState.INSTANCE.start(sendComponentValues);

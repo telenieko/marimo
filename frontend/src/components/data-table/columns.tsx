@@ -1,4 +1,6 @@
 /* Copyright 2024 Marimo. All rights reserved. */
+"use no memo";
+
 import type { ColumnDef } from "@tanstack/react-table";
 import {
   DataTableColumnHeader,
@@ -6,19 +8,38 @@ import {
 } from "./column-header";
 import { Checkbox } from "../ui/checkbox";
 import { MimeCell } from "./mime-cell";
-import { uniformSample } from "./uniformSample";
 import type { DataType } from "@/core/kernel/messages";
 import { TableColumnSummary } from "./column-summary";
 import type { FilterType } from "./filters";
 import type { FieldTypesWithExternalType } from "./types";
 import { UrlDetector } from "./url-detector";
+import { cn } from "@/utils/cn";
+import { uniformSample } from "./uniformSample";
+import { DatePopover } from "./date-popover";
+import { Objects } from "@/utils/objects";
+import { Maps } from "@/utils/maps";
+import { exactDateTime } from "@/utils/dates";
 
-interface ColumnInfo {
-  key: string;
-  type: "primitive" | "mime";
+function inferDataType(value: unknown): [type: DataType, displayType: string] {
+  if (typeof value === "string") {
+    return ["string", "string"];
+  }
+  if (typeof value === "number") {
+    return ["number", "number"];
+  }
+  if (value instanceof Date) {
+    return ["datetime", "datetime"];
+  }
+  if (typeof value === "boolean") {
+    return ["boolean", "boolean"];
+  }
+  if (value == null) {
+    return ["unknown", "object"];
+  }
+  return ["unknown", "object"];
 }
 
-function getColumnInfo<T>(items: T[]): ColumnInfo[] {
+export function inferFieldTypes<T>(items: T[]): FieldTypesWithExternalType {
   // No items
   if (items.length === 0) {
     return [];
@@ -29,7 +50,7 @@ function getColumnInfo<T>(items: T[]): ColumnInfo[] {
     return [];
   }
 
-  const keys = new Map<string, ColumnInfo>();
+  const fieldTypes: Record<string, [DataType, string]> = {};
 
   // This can be slow for large datasets,
   // so only sample 10 evenly distributed rows
@@ -40,119 +61,171 @@ function getColumnInfo<T>(items: T[]): ColumnInfo[] {
     // We will be a bit defensive and assume values are not homogeneous.
     // If any is a mimetype, then we will treat it as a mimetype (i.e. not sortable)
     Object.entries(item as object).forEach(([key, value], idx) => {
-      const currentValue = keys.get(key);
+      const currentValue = fieldTypes[key];
       if (!currentValue) {
         // Set for the first time
-        keys.set(key, {
-          key,
-          type: isPrimitiveOrNullish(value) ? "primitive" : "mime",
-        });
+        fieldTypes[key] = inferDataType(value);
       }
-      // If we have a value, and it is a primitive, we could possibly upgrade it to a mime
-      if (
-        currentValue &&
-        currentValue.type === "primitive" &&
-        !isPrimitiveOrNullish(value)
-      ) {
-        keys.set(key, {
-          key,
-          type: "mime",
-        });
+
+      // If its not null, override the type
+      if (value != null) {
+        // This can be lossy as we infer take the last seen type
+        fieldTypes[key] = inferDataType(value);
       }
     });
   });
 
-  return [...keys.values()];
+  return Objects.entries(fieldTypes);
 }
 
+export const NAMELESS_COLUMN_PREFIX = "__m_column__";
+
 export function generateColumns<T>({
-  items,
   rowHeaders,
   selection,
-  showColumnSummaries,
   fieldTypes,
+  textJustifyColumns,
+  wrappedColumns,
+  showDataTypes,
 }: {
-  items: T[];
   rowHeaders: string[];
   selection: "single" | "multi" | null;
-  showColumnSummaries: boolean;
-  fieldTypes?: FieldTypesWithExternalType;
+  fieldTypes: FieldTypesWithExternalType;
+  textJustifyColumns?: Record<string, "left" | "center" | "right">;
+  wrappedColumns?: string[];
+  showDataTypes?: boolean;
 }): Array<ColumnDef<T>> {
-  const columnInfo = getColumnInfo(items);
   const rowHeadersSet = new Set(rowHeaders);
 
-  const columns = columnInfo.map(
-    (info, idx): ColumnDef<T> => ({
-      id: info.key || `__m_column__${idx}`,
+  const typesByColumn = Maps.keyBy(fieldTypes, (entry) => entry[0]);
+
+  const getMeta = (key: string) => {
+    const types = typesByColumn.get(key)?.[1];
+    const isRowHeader = rowHeadersSet.has(key);
+
+    if (isRowHeader || !types) {
+      return {
+        rowHeader: isRowHeader,
+      };
+    }
+
+    return {
+      rowHeader: isRowHeader,
+      filterType: getFilterTypeForFieldType(types[0]),
+      dtype: types[1],
+      dataType: types[0],
+    };
+  };
+
+  const columnKeys = [
+    ...rowHeaders,
+    ...fieldTypes.map(([columnName]) => columnName),
+  ];
+  const columns = columnKeys.map(
+    (key, idx): ColumnDef<T> => ({
+      id: key || `${NAMELESS_COLUMN_PREFIX}${idx}`,
       // Use an accessorFn instead of an accessorKey because column names
       // may have periods in them ...
       // https://github.com/TanStack/table/issues/1671
       accessorFn: (row) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return (row as any)[info.key];
+        return (row as any)[key];
       },
 
       header: ({ column }) => {
-        // Row headers have no summaries
-        if (rowHeadersSet.has(info.key)) {
-          return <DataTableColumnHeader header={info.key} column={column} />;
-        }
+        const dtype = column.columnDef.meta?.dtype;
+        const headerWithType = (
+          <div className="flex flex-col">
+            <span className="font-bold">{key}</span>
+            {showDataTypes && dtype && (
+              <span className="text-xs text-muted-foreground">{dtype}</span>
+            )}
+          </div>
+        );
 
-        if (!showColumnSummaries) {
-          return <DataTableColumnHeader header={info.key} column={column} />;
+        // Row headers have no summaries
+        if (rowHeadersSet.has(key)) {
+          return (
+            <DataTableColumnHeader header={headerWithType} column={column} />
+          );
         }
 
         return (
           <DataTableColumnHeaderWithSummary
-            header={info.key}
+            key={key}
+            header={headerWithType}
             column={column}
-            summary={<TableColumnSummary columnId={info.key} />}
+            summary={<TableColumnSummary columnId={key} />}
           />
         );
       },
 
       cell: ({ column, renderValue, getValue }) => {
         // Row headers are bold
-        if (rowHeadersSet.has(info.key)) {
+        if (rowHeadersSet.has(key)) {
           return <b>{String(renderValue())}</b>;
         }
 
         const value = getValue();
+        const justify = textJustifyColumns?.[key];
+        const wrapped = wrappedColumns?.includes(key);
 
         const format = column.getColumnFormatting?.();
         if (format) {
-          return column.applyColumnFormatting(value);
+          return (
+            <div className={getCellStyleClass(justify, wrapped)}>
+              {column.applyColumnFormatting(value)}
+            </div>
+          );
         }
 
         if (isPrimitiveOrNullish(value)) {
           const rendered = renderValue();
-          if (rendered == null) {
-            return "";
-          }
-          if (typeof rendered === "string") {
-            return <UrlDetector text={rendered} />;
-          }
-          return String(rendered);
+          return (
+            <div className={getCellStyleClass(justify, wrapped)}>
+              {rendered == null ? (
+                ""
+              ) : typeof rendered === "string" ? (
+                <UrlDetector text={rendered} />
+              ) : (
+                String(rendered)
+              )}
+            </div>
+          );
         }
-        return <MimeCell value={value} />;
+
+        if (value instanceof Date) {
+          // e.g. 2010-10-07 17:15:00
+          const type =
+            column.columnDef.meta?.dataType === "date" ? "date" : "datetime";
+          return (
+            <div className={getCellStyleClass(justify, wrapped)}>
+              <DatePopover date={value} type={type}>
+                {exactDateTime(value)}
+              </DatePopover>
+            </div>
+          );
+        }
+
+        return (
+          <div className={getCellStyleClass(justify, wrapped)}>
+            <MimeCell value={value} />
+          </div>
+        );
       },
-      // Only enable sorting for primitive types and non-row headers
-      enableSorting: info.type === "primitive" && !rowHeadersSet.has(info.key),
       // Remove any default filtering
       filterFn: undefined,
-      meta: {
-        type: info.type,
-        rowHeader: rowHeadersSet.has(info.key),
-        filterType: getFilterTypeForFieldType(fieldTypes?.[info.key]?.[0]),
-        dtype: fieldTypes?.[info.key]?.[1],
-        dataType: fieldTypes?.[info.key]?.[0],
-      },
+      // Can only sort if key is defined
+      // For example, unnamed index columns, won't be sortable
+      enableSorting: !!key,
+      meta: getMeta(key),
     }),
   );
 
   if (selection === "single" || selection === "multi") {
     columns.unshift({
       id: "__select__",
+      maxSize: 40,
       header: ({ table }) =>
         selection === "multi" ? (
           <Checkbox
@@ -162,7 +235,7 @@ export function generateColumns<T>({
               table.toggleAllPageRowsSelected(!!value)
             }
             aria-label="Select all"
-            className="mx-2"
+            className="mx-1.5 my-4"
           />
         ) : null,
       cell: ({ row }) => (
@@ -205,9 +278,26 @@ function getFilterTypeForFieldType(
       return "number";
     case "date":
       return "date";
+    case "datetime":
+      return "datetime";
+    case "time":
+      return "time";
     case "boolean":
       return "boolean";
     default:
       return undefined;
   }
+}
+
+function getCellStyleClass(
+  justify: "left" | "center" | "right" | undefined,
+  wrapped: boolean | undefined,
+): string {
+  return cn(
+    "w-full",
+    "text-left",
+    justify === "center" && "text-center",
+    justify === "right" && "text-right",
+    wrapped && "whitespace-pre-wrap min-w-[200px] break-words",
+  );
 }

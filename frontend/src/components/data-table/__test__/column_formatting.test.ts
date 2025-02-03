@@ -1,7 +1,10 @@
 /* Copyright 2024 Marimo. All rights reserved. */
 import { describe, expect, it } from "vitest";
 import { applyFormat } from "../column-formatting/feature";
-import { prettyScientificNumber } from "@/utils/numbers";
+import {
+  prettyScientificNumber,
+  prettyEngineeringNumber,
+} from "@/utils/numbers";
 
 describe("applyFormat", () => {
   it("should return an empty string for null, undefined, or empty string values", () => {
@@ -18,6 +21,18 @@ describe("applyFormat", () => {
         "10/1/23, 12:00:00 PM UTC",
       );
     });
+
+    it("should format time values correctly", () => {
+      const time = "12:00:00Z";
+      expect(applyFormat(time, "Time", "time")).toBe("12:00:00Z");
+    });
+
+    it("should format datetime values correctly", () => {
+      const datetime = "2023-10-01T12:00:00Z";
+      expect(applyFormat(datetime, "Datetime", "datetime")).toBe(
+        "10/1/23, 12:00:00 PM UTC",
+      );
+    });
   });
 
   describe("number formatting", () => {
@@ -27,6 +42,9 @@ describe("applyFormat", () => {
       expect(applyFormat(number, "Percent", "number")).toBe("123,456.7%");
       expect(applyFormat(number, "Scientific", "number")).toBe(
         prettyScientificNumber(1234.567),
+      );
+      expect(applyFormat(number, "Engineering", "number")).toBe(
+        prettyEngineeringNumber(1234.567),
       );
       expect(applyFormat(number, "Integer", "number")).toBe("1,235");
     });

@@ -33,7 +33,13 @@ import { toast } from "@/components/ui/use-toast";
 import { generateUUID } from "@/utils/uuid";
 import { store } from "../state/jotai";
 import { notebookIsRunningAtom } from "../cells/cells";
-import { getInitialAppMode } from "../mode";
+import { getInitialAppMode, initialMode } from "../mode";
+import { wasmInitializationAtom } from "./state";
+import { reloadSafe } from "@/utils/reload-safe";
+
+type SaveWorker = ReturnType<
+  typeof getWorkerRPC<SaveWorkerSchema>
+>["proxy"]["request"];
 
 export class PyodideBridge implements RunRequests, EditRequests {
   static get INSTANCE(): PyodideBridge {
@@ -45,11 +51,36 @@ export class PyodideBridge implements RunRequests, EditRequests {
   }
 
   private rpc!: ReturnType<typeof getWorkerRPC<WorkerSchema>>;
-  private saveRpc!: ReturnType<typeof getWorkerRPC<SaveWorkerSchema>>;
+  private saveRpc: SaveWorker | undefined;
   private interruptBuffer?: Uint8Array;
   private messageConsumer: ((message: string) => void) | undefined;
 
   public initialized = new Deferred<void>();
+
+  private getSaveWorker(): SaveWorker {
+    if (initialMode === "read") {
+      Logger.debug("Skipping SaveWorker in read-mode");
+      return {
+        readFile: throwNotImplemented,
+        readNotebook: throwNotImplemented,
+        saveNotebook: throwNotImplemented,
+      };
+    }
+
+    // Create save worker
+    const saveWorker = new Worker(
+      // eslint-disable-next-line unicorn/relative-url-style
+      new URL("./worker/save-worker.ts", import.meta.url),
+      {
+        type: "module",
+        // Pass the version to the worker
+        /* @vite-ignore */
+        name: getMarimoVersion(),
+      },
+    );
+
+    return getWorkerRPC<SaveWorkerSchema>(saveWorker).proxy.request;
+  }
 
   private constructor() {
     if (!isWasm()) {
@@ -68,29 +99,22 @@ export class PyodideBridge implements RunRequests, EditRequests {
       },
     );
 
-    // Create save worker
-    const saveWorker = new Worker(
-      // eslint-disable-next-line unicorn/relative-url-style
-      new URL("./worker/save-worker.ts", import.meta.url),
-      {
-        type: "module",
-        // Pass the version
-        /* @vite-ignore */
-        name: getMarimoVersion(),
-      },
-    );
-
     // Create the RPC
     this.rpc = getWorkerRPC<WorkerSchema>(worker);
-    this.saveRpc = getWorkerRPC<SaveWorkerSchema>(saveWorker);
 
     // Listeners
     this.rpc.addMessageListener("ready", () => {
       this.startSession();
     });
     this.rpc.addMessageListener("initialized", () => {
+      // Wait until the worker is ready to create the save worker
+      // By initializing after, we get hits on cached network requests
+      this.saveRpc = this.getSaveWorker();
       this.setInterruptBuffer();
       this.initialized.resolve();
+    });
+    this.rpc.addMessageListener("initializingMessage", ({ message }) => {
+      store.set(wasmInitializationAtom, message);
     });
     this.rpc.addMessageListener("initializedError", ({ error }) => {
       // If already resolved, show a toast
@@ -178,13 +202,28 @@ export class PyodideBridge implements RunRequests, EditRequests {
   };
 
   sendSave: EditRequests["sendSave"] = async (request) => {
-    await this.saveRpc.proxy.request.saveNotebook(request);
+    if (!this.saveRpc) {
+      Logger.warn("Save RPC not initialized");
+      return null;
+    }
+
+    await this.saveRpc.saveNotebook(request);
     const code = await this.readCode();
     if (code.contents) {
       notebookFileStore.saveFile(code.contents);
       fallbackFileStore.saveFile(code.contents);
     }
+    // Also save to the other worker, since this is needed for
+    // exporting to HTML
+    // Fire-and-forget
+    void this.rpc.proxy.request.saveNotebook(request).catch((error) => {
+      Logger.error(error);
+    });
     return null;
+  };
+
+  sendCopy: EditRequests["sendCopy"] = async () => {
+    throwNotImplemented();
   };
 
   sendStdin: EditRequests["sendStdin"] = async (request) => {
@@ -262,7 +301,12 @@ export class PyodideBridge implements RunRequests, EditRequests {
       "/kernel/save_user_config",
       request,
       { baseUrl: "/" },
-    );
+    ).catch((error) => {
+      // Just log to the console. It is likely a user who hosts their own web-assembly
+      // won't use this.
+      Logger.error(error);
+      return null;
+    });
   };
 
   saveAppConfig: EditRequests["saveAppConfig"] = async (request) => {
@@ -285,12 +329,16 @@ export class PyodideBridge implements RunRequests, EditRequests {
       notebookFileStore.saveFile(code.contents);
       fallbackFileStore.saveFile(code.contents);
     }
-    window.location.reload();
+    reloadSafe();
     return null;
   };
 
   readCode: EditRequests["readCode"] = async () => {
-    const contents = await this.saveRpc.proxy.request.readNotebook();
+    if (!this.saveRpc) {
+      Logger.warn("Save RPC not initialized");
+      return { contents: "" };
+    }
+    const contents = await this.saveRpc.readNotebook();
     return { contents };
   };
 
@@ -415,10 +463,25 @@ export class PyodideBridge implements RunRequests, EditRequests {
   };
   syncCellIds = () => Promise.resolve(null);
   getUsageStats = throwNotImplemented;
+  openTutorial = throwNotImplemented;
   getRecentFiles = throwNotImplemented;
   getWorkspaceFiles = throwNotImplemented;
   getRunningNotebooks = throwNotImplemented;
   shutdownSession = throwNotImplemented;
+  autoExportAsHTML = throwNotImplemented;
+  autoExportAsMarkdown = throwNotImplemented;
+  autoExportAsIPYNB = throwNotImplemented;
+
+  addPackage: EditRequests["addPackage"] = async (request) => {
+    return this.rpc.proxy.request.addPackage(request);
+  };
+  removePackage: EditRequests["removePackage"] = async (request) => {
+    return this.rpc.proxy.request.removePackage(request);
+  };
+  getPackageList = async () => {
+    const response = await this.rpc.proxy.request.listPackages();
+    return response;
+  };
 
   private async putControlRequest(operation: object) {
     await this.rpc.proxy.request.bridge({

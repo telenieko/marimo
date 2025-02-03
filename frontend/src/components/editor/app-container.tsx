@@ -1,5 +1,5 @@
 /* Copyright 2024 Marimo. All rights reserved. */
-import { WebSocketState } from "@/core/websocket/types";
+import { type ConnectionStatus, WebSocketState } from "@/core/websocket/types";
 import { cn } from "@/utils/cn";
 import type React from "react";
 import type { PropsWithChildren } from "react";
@@ -10,30 +10,35 @@ import { PyodideLoader } from "@/core/wasm/PyodideLoader";
 import { DynamicFavicon } from "./dynamic-favicon";
 
 interface Props {
-  connectionState: WebSocketState;
+  connection: ConnectionStatus;
   isRunning: boolean;
   width: AppConfig["width"];
 }
 
 export const AppContainer: React.FC<PropsWithChildren<Props>> = ({
   width,
-  connectionState,
+  connection,
   isRunning,
   children,
 }) => {
+  const connectionState = connection.state;
+
   return (
     <>
       <DynamicFavicon isRunning={isRunning} />
-      <StatusOverlay state={connectionState} isRunning={isRunning} />
+      <StatusOverlay connection={connection} isRunning={isRunning} />
       <PyodideLoader>
         <WrappedWithSidebar>
           <div
             id="App"
+            data-config-width={width}
+            data-connection-state={connectionState}
             className={cn(
               connectionState === WebSocketState.CLOSED && "disconnected",
               "bg-background w-full h-full text-textColor",
-              "flex flex-col overflow-y-auto overflow-x-hidden",
+              "flex flex-col overflow-y-auto",
               width === "full" && "config-width-full",
+              width === "columns" ? "overflow-x-auto" : "overflow-x-hidden",
               "print:height-fit",
             )}
           >

@@ -18,6 +18,7 @@ export function createErrorToastingRequests(
     sendRunScratchpad: "Failed to run scratchpad",
     sendRename: "Failed to rename",
     sendSave: "Failed to save",
+    sendCopy: "Failed to copy",
     sendInterrupt: "Failed to interrupt",
     sendShutdown: "Failed to shutdown",
     sendFormat: "Failed to format",
@@ -31,13 +32,14 @@ export function createErrorToastingRequests(
     readSnippets: "Failed to fetch snippets",
     previewDatasetColumn: "Failed to fetch data sources",
     openFile: "Failed to open file",
-    getUsageStats: "", // Empty string because we don't show a toast for this
+    getUsageStats: "", // No toast
     sendListFiles: "Failed to list files",
     sendCreateFileOrFolder: "Failed to create file or folder",
     sendDeleteFileOrFolder: "Failed to delete file or folder",
     sendRenameFileOrFolder: "Failed to rename file or folder",
     sendUpdateFile: "Failed to update file",
     sendFileDetails: "Failed to get file details",
+    openTutorial: "Failed to open tutorial",
     sendInstallMissingPackages: "Failed to install missing packages",
     getRecentFiles: "Failed to get recent files",
     getWorkspaceFiles: "Failed to get workspace files",
@@ -45,6 +47,12 @@ export function createErrorToastingRequests(
     shutdownSession: "Failed to shutdown session",
     exportAsHTML: "Failed to export HTML",
     exportAsMarkdown: "Failed to export Markdown",
+    autoExportAsHTML: "", // No toast
+    autoExportAsMarkdown: "", // No toast
+    autoExportAsIPYNB: "", // No toast
+    addPackage: "Failed to add package",
+    removePackage: "Failed to remove package",
+    getPackageList: "Failed to get package list",
   };
 
   const handlers = {} as EditRequests & RunRequests;

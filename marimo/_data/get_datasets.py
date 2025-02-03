@@ -33,8 +33,9 @@ def _get_data_table(value: object, variable_name: str) -> Optional[DataTable]:
                 name=column_name,
                 type=column_type[0],
                 external_type=column_type[1],
+                sample_values=table.get_sample_values(column_name),
             )
-            for column_name, column_type in table.get_field_types().items()
+            for column_name, column_type in table.get_field_types()
         ]
         return DataTable(
             name=variable_name,
@@ -115,6 +116,7 @@ def _get_datasets_from_duckdb_internal() -> List[DataTable]:
                 name=column_name,
                 type=_db_type_to_data_type(column_type),
                 external_type=column_type,
+                sample_values=[],
             )
             for column_name, column_type in zip(
                 cast(list[str], column_names),
@@ -138,20 +140,63 @@ def _get_datasets_from_duckdb_internal() -> List[DataTable]:
 
 
 def _db_type_to_data_type(db_type: str) -> DataType:
-    if db_type == "INTEGER":
+    db_type = db_type.lower()
+    # Numeric types
+    if db_type in [
+        "tinyint",
+        "smallint",
+        "integer",
+        "bigint",
+        "hugeint",
+        "utinyint",
+        "usmallint",
+        "uinteger",
+        "ubigint",
+        "uhugeint",
+    ]:
         return "integer"
-    if db_type == "FLOAT":
+    if db_type in [
+        "float",
+        "real",
+        "double",
+        "decimal",
+        "numeric",
+    ] or db_type.startswith("decimal"):
         return "number"
-    if db_type == "BOOLEAN":
+    # Boolean type
+    if db_type == "boolean":
         return "boolean"
-    if db_type == "VARCHAR":
+    # String types
+    if db_type in [
+        "varchar",
+        "char",
+        "bpchar",
+        "text",
+        "string",
+        "blob",
+        "uuid",
+    ]:
         return "string"
-    if db_type == "DATE":
+    # Date and Time types
+    if db_type == "date":
         return "date"
-    if db_type == "DATETIME":
-        return "date"
-    if db_type == "TIMESTAMP":
-        return "date"
-    if db_type == "TIME":
-        return "date"
+    if db_type == "time":
+        return "time"
+    if db_type in [
+        "timestamp",
+        "timestamp with time zone",
+        "timestamptz",
+        "datetime",
+        "interval",
+    ]:
+        return "datetime"
+    # Nested types
+    if db_type in ["array", "list", "struct", "map", "union"]:
+        return "unknown"
+    # Special types
+    if db_type == "bit":
+        return "string"  # Representing bit as string
+    if db_type == "enum":
+        return "string"  # Representing enum as string
+    # Unknown type
     return "unknown"

@@ -8,7 +8,7 @@ import type { CellConfig, RuntimeState } from "../network/types";
 /**
  * Holds state for the last focused cell.
  */
-const lastFocusedCellIdAtom = atom<CellId | null>(null);
+export const lastFocusedCellIdAtom = atom<CellId | null>(null);
 
 export function useLastFocusedCellId() {
   return useAtomValue(lastFocusedCellIdAtom);
@@ -30,6 +30,7 @@ export const lastFocusedCellAtom = atom<{
   status: RuntimeState;
   getEditorView: () => EditorView | null;
   hasOutput: boolean;
+  hasConsoleOutput: boolean;
 } | null>((get) => {
   const cellId = get(lastFocusedCellIdAtom);
   if (!cellId) {
@@ -66,5 +67,6 @@ function cellFocusDetails(cellId: CellId, notebookState: NotebookState) {
     status: runtime ? runtime.status : "idle",
     getEditorView: getEditorView,
     hasOutput: runtime?.output != null,
+    hasConsoleOutput: runtime?.consoleOutputs != null,
   };
 }

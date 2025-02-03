@@ -1,4 +1,6 @@
 # Copyright 2024 Marimo. All rights reserved.
+from __future__ import annotations
+
 from marimo._cli.envinfo import (
     get_system_info,
 )
@@ -15,8 +17,8 @@ def test_get_node_version() -> None:
 
 def test_get_package_versions() -> None:
     system_info = get_system_info()
-    assert "Requirements" in system_info
-    package_versions = system_info["Requirements"]
+    assert "Dependencies" in system_info
+    package_versions = system_info["Dependencies"]
 
     assert isinstance(package_versions, dict)
     assert "click" in package_versions
@@ -33,4 +35,5 @@ def test_get_system_info() -> None:
     assert "OS Version" in system_info
     assert "Python Version" in system_info
     assert "Binaries" in system_info
-    assert "Requirements" in system_info
+    assert "Dependencies" in system_info
+    assert "Experimental Flags" in system_info

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import pathlib
 import subprocess
 import textwrap
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytest
-from marimo._ast.app import App, _AppConfig, InternalApp
+from marimo._ast.app import App, _AppConfig
 from marimo._ast.errors import (
     CycleError,
     DeleteNonlocalError,
@@ -15,14 +16,10 @@ from marimo._ast.errors import (
     UnparsableError,
 )
 from marimo._dependencies.dependencies import DependencyManager
-from marimo._output.formatting import as_html
 from marimo._plugins.stateless.flex import vstack
 from marimo._runtime.requests import SetUIElementValueRequest
 from marimo._runtime.runtime import Kernel
 from tests.conftest import ExecReqProvider
-
-if TYPE_CHECKING:
-    import pathlib
 
 
 # don't complain for useless expressions (cell outputs)
@@ -162,8 +159,9 @@ class TestApp:
         app._unparsable_cell("_ _")
         app._unparsable_cell("_ _", name="foo")
 
-        with pytest.raises(UnparsableError):
+        with pytest.raises(UnparsableError) as e:
             app.run()
+        e.match("_ _")
 
     @staticmethod
     def test_init_not_rewritten_as_local() -> None:
@@ -310,15 +308,17 @@ class TestApp:
         assert app._config.asdict() == {
             "app_title": None,
             "css_file": None,
+            "html_head_file": None,
             "width": "full",
             "layout_file": None,
+            "auto_download": [],
         }
 
     @staticmethod
     def test_cell_config() -> None:
         app = App()
 
-        @app.cell(disabled=True)
+        @app.cell(column=0, disabled=True)
         def _() -> tuple[int]:
             __x__ = 0
             return (__x__,)
@@ -331,6 +331,7 @@ class TestApp:
         cell_manager = app._cell_manager
         configs = tuple(cell_manager.configs())
         assert configs[0].disabled
+        assert configs[0].column is not None
         assert configs[1].hide_code
 
     @staticmethod
@@ -377,8 +378,7 @@ class TestApp:
 
         @app.cell
         def __() -> tuple[Any]:
-            def foo() -> None:
-                ...
+            def foo() -> None: ...
 
             return (foo,)
 
@@ -460,6 +460,72 @@ class TestApp:
         assert isinstance(outputs[1], Axes)
         assert outputs[0] != outputs[1]
 
+    @staticmethod
+    def test_app_config_auto_download():
+        # Test default value
+        config = _AppConfig()
+        assert config.auto_download == []
+
+        # Test setting auto_download
+        config = _AppConfig(auto_download=["html", "markdown"])
+        assert config.auto_download == ["html", "markdown"]
+
+        # Test updating auto_download
+        config.update({"auto_download": ["html"]})
+        assert config.auto_download == ["html"]
+
+        # Test setting empty list
+        config.update({"auto_download": []})
+        assert config.auto_download == []
+
+        # Test from_untrusted_dict
+        config = _AppConfig.from_untrusted_dict(
+            {"auto_download": ["markdown"]}
+        )
+        assert config.auto_download == ["markdown"]
+
+        # Test asdict
+        config_dict = config.asdict()
+        assert config_dict["auto_download"] == ["markdown"]
+
+        # Test invalid values are allowed for forward compatibility
+        config = _AppConfig(auto_download=["invalid"])
+        assert config.auto_download == ["invalid"]
+
+    def test_has_file_and_dirname(self) -> None:
+        app = App()
+
+        @app.cell
+        def f():
+            file = __file__
+
+        @app.cell
+        def g():
+            import marimo as mo
+
+            dirpath = mo.notebook_dir()
+
+        _, glbls = app.run()
+        assert glbls["file"] == __file__
+        assert glbls["dirpath"] == pathlib.Path(glbls["file"]).parent
+
+    def test_notebook_location(self) -> None:
+        app = App()
+
+        @app.cell
+        def __():
+            import marimo as mo
+
+            dirpath = mo.notebook_dir()
+            location = mo.notebook_location()
+
+        _, glbls = app.run()
+        dirpath = glbls["dirpath"]
+        location = glbls["location"]
+        assert dirpath is not None
+        assert location is not None
+        assert dirpath == location
+
 
 def test_app_config() -> None:
     config = _AppConfig.from_untrusted_dict({"width": "full"})
@@ -468,8 +534,10 @@ def test_app_config() -> None:
     assert config.asdict() == {
         "app_title": None,
         "css_file": None,
+        "html_head_file": None,
         "width": "full",
         "layout_file": None,
+        "auto_download": [],
     }
 
 
@@ -482,8 +550,10 @@ def test_app_config_extra_args_ignored() -> None:
     assert config.asdict() == {
         "app_title": None,
         "css_file": None,
+        "html_head_file": None,
         "width": "full",
         "layout_file": None,
+        "auto_download": [],
     }
 
 

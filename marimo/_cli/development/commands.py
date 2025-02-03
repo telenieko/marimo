@@ -8,40 +8,40 @@ import sys
 from typing import TYPE_CHECKING, Any, Dict
 
 import click
-from starlette.schemas import SchemaGenerator
 
-import marimo._data.models as data
-import marimo._messaging.errors as errors
-import marimo._messaging.ops as ops
-import marimo._runtime.requests as requests
-import marimo._server.models.completion as completion
-import marimo._server.models.export as export
-import marimo._server.models.files as files
-import marimo._server.models.home as home
-import marimo._server.models.models as models
-import marimo._snippets.snippets as snippets
-from marimo import __version__
-from marimo._ast.cell import CellConfig, RuntimeStateType
 from marimo._cli.print import orange
-from marimo._config.config import MarimoConfig
-from marimo._dependencies.dependencies import DependencyManager
-from marimo._messaging.cell_output import CellChannel, CellOutput
-from marimo._messaging.mimetypes import KnownMimeType
-from marimo._output.mime import MIME
-from marimo._plugins.core.web_component import JSONType
-from marimo._runtime.packages.module_name_to_pypi_name import (
-    module_name_to_pypi_name,
-)
-from marimo._server.api.router import build_routes
-from marimo._utils.dataclass_to_openapi import (
-    PythonTypeToOpenAPI,
-)
 
 if TYPE_CHECKING:
     import psutil
 
 
 def _generate_schema() -> dict[str, Any]:
+    from starlette.schemas import SchemaGenerator
+
+    import marimo._data.models as data
+    import marimo._messaging.errors as errors
+    import marimo._messaging.ops as ops
+    import marimo._runtime.requests as requests
+    import marimo._server.models.completion as completion
+    import marimo._server.models.export as export
+    import marimo._server.models.files as files
+    import marimo._server.models.home as home
+    import marimo._server.models.models as models
+    import marimo._server.models.packages as packages
+    import marimo._snippets.snippets as snippets
+    from marimo import __version__
+    from marimo._ast.cell import CellConfig, RuntimeStateType
+    from marimo._config.config import MarimoConfig
+    from marimo._messaging.cell_output import CellChannel, CellOutput
+    from marimo._messaging.mimetypes import KnownMimeType
+    from marimo._output.mime import MIME
+    from marimo._plugins.core.web_component import JSONType
+    from marimo._runtime.packages.package_manager import PackageDescription
+    from marimo._server.api.router import build_routes
+    from marimo._utils.dataclass_to_openapi import (
+        PythonTypeToOpenAPI,
+    )
+
     # dataclass components used in websocket messages
     # these are always snake_case
     MESSAGES = [
@@ -59,6 +59,7 @@ def _generate_schema() -> dict[str, Any]:
         errors.MultipleDefinitionError,
         errors.DeleteNonlocalError,
         errors.MarimoInterruptionError,
+        errors.MarimoInternalError,
         errors.MarimoAncestorStoppedError,
         errors.MarimoAncestorPreventedError,
         errors.MarimoStrictExecutionError,
@@ -72,6 +73,7 @@ def _generate_schema() -> dict[str, Any]:
         data.DataTableColumn,
         data.DataTable,
         data.ColumnSummary,
+        data.DataSourceConnection,
         # Operations
         ops.CellOp,
         ops.HumanReadableStatus,
@@ -102,6 +104,7 @@ def _generate_schema() -> dict[str, Any]:
         ops.UpdateCellIdsRequest,
         ops.FocusCell,
         ops.MessageOperation,
+        ops.DataSourceConnections,
     ]
 
     # dataclass components used in requests/responses
@@ -120,6 +123,7 @@ def _generate_schema() -> dict[str, Any]:
         export.ExportAsHTMLRequest,
         export.ExportAsMarkdownRequest,
         export.ExportAsScriptRequest,
+        export.ExportAsIPYNBRequest,
         files.FileCreateRequest,
         files.FileCreateResponse,
         files.FileDeleteRequest,
@@ -132,6 +136,12 @@ def _generate_schema() -> dict[str, Any]:
         files.FileMoveResponse,
         files.FileUpdateRequest,
         files.FileUpdateResponse,
+        packages.AddPackageRequest,
+        PackageDescription,
+        packages.ListPackagesResponse,
+        packages.PackageOperationResponse,
+        packages.RemovePackageRequest,
+        home.OpenTutorialRequest,
         home.RecentFilesResponse,
         home.RunningNotebooksResponse,
         home.ShutdownSessionRequest,
@@ -148,13 +158,13 @@ def _generate_schema() -> dict[str, Any]:
         models.RunScratchpadRequest,
         models.SaveAppConfigurationRequest,
         models.SaveNotebookRequest,
+        models.CopyNotebookRequest,
         models.SaveUserConfigurationRequest,
         models.StdinRequest,
         models.SuccessResponse,
         models.SuccessResponse,
         models.UpdateComponentValuesRequest,
         requests.CodeCompletionRequest,
-        requests.CreationRequest,
         requests.DeleteCellRequest,
         requests.ExecuteMultipleRequest,
         requests.ExecuteScratchpadRequest,
@@ -183,7 +193,8 @@ def _generate_schema() -> dict[str, Any]:
                 {"type": "boolean"},
                 {"type": "null"},
             ]
-        }
+        },
+        "HTTPRequest": {"type": "null"},
     }
     # We must override the names of some Union Types,
     # otherwise, their __name__ is "Union"
@@ -331,10 +342,12 @@ def killall() -> None:
 @click.command(
     help="Inline packages according to PEP 723", name="inline-packages"
 )
-@click.argument("name", required=True)
-def inline_packages(
-    name: str,
-) -> None:
+@click.argument(
+    "name",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False),
+)
+def inline_packages(name: str) -> None:
     """
     Example usage:
 
@@ -346,6 +359,10 @@ def inline_packages(
     Requires uv.
     Installation: https://docs.astral.sh/uv/getting-started/installation/
     """
+    from marimo._dependencies.dependencies import DependencyManager
+    from marimo._runtime.packages.module_name_to_pypi_name import (
+        module_name_to_pypi_name,
+    )
 
     # Validate uv is installed
     if not DependencyManager.which("uv"):
@@ -408,6 +425,35 @@ def inline_packages(
     )
 
 
+@click.command(help="Print all routes")
+def print_routes() -> None:
+    from starlette.applications import Starlette
+    from starlette.routing import Mount, Route, Router
+
+    from marimo._server.main import create_starlette_app
+
+    app = create_starlette_app(base_url="")
+
+    def print_all_routes(app: Any, base_path: str = "") -> None:
+        if not isinstance(app, (Starlette, Router)):
+            return
+        for route in app.routes:
+            if isinstance(route, Route) and route.methods is not None:
+                full_path = base_path + route.path
+                for method in route.methods:
+                    if method == "HEAD":
+                        continue
+                    click.echo(f"{method} {full_path}")
+            elif isinstance(route, Mount) and route.app is not None:
+                # Recursively append base path for mounted apps
+                new_base_path = base_path + route.path
+                print_all_routes(route.app, new_base_path)
+
+    print_all_routes(app)
+    return
+
+
 development.add_command(inline_packages)
 development.add_command(openapi)
 development.add_command(ps)
+development.add_command(print_routes)

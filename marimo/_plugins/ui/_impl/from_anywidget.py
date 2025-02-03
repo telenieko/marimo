@@ -1,7 +1,7 @@
 # Copyright 2024 Marimo. All rights reserved.
 from __future__ import annotations
 
-import json
+import hashlib
 import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Optional
@@ -11,7 +11,7 @@ from marimo import _loggers
 from marimo._output.rich_help import mddoc
 from marimo._plugins.core.json_encoder import WebComponentEncoder
 from marimo._plugins.ui._core.ui_element import InitializationArgs, UIElement
-from marimo._plugins.ui._impl.anywidget.comm import MarimoComm
+from marimo._plugins.ui._impl.comm import MarimoComm
 from marimo._runtime.functions import Function
 
 if TYPE_CHECKING:
@@ -45,36 +45,34 @@ class SendToWidgetArgs:
 
 @mddoc
 class anywidget(UIElement[T, T]):
-    """
-    Create a UIElement from an AnyWidget.
-    This proxies all the widget's attributes and methods.
+    """Create a UIElement from an AnyWidget.
 
-    **Example.**
+    This proxies all the widget's attributes and methods, allowing seamless
+    integration of AnyWidget instances with Marimo's UI system.
 
-    ```python
-    from drawdata import ScatterWidget
-    import marimo as mo
+    Examples:
+        ```python
+        from drawdata import ScatterWidget
+        import marimo as mo
 
-    scatter = ScatterWidget()
-    scatter = mo.ui.anywidget(scatter)
+        scatter = ScatterWidget()
+        scatter = mo.ui.anywidget(scatter)
 
-    # In another cell, access its value
-    # This works for all widgets
-    scatter.value
+        # In another cell, access its value
+        # This works for all widgets
+        scatter.value
 
-    # Or attributes specifically on the ScatterWidget
-    scatter.data_as_pandas
-    scatter.data_as_polars
-    ```
+        # Or attributes specifically on the ScatterWidget
+        scatter.data_as_pandas
+        scatter.data_as_polars
+        ```
 
-    **Attributes.**
+    Attributes:
+        value (Dict[str, Any]): The value of the widget's traits as a dictionary.
+        widget (AnyWidget): The widget being wrapped.
 
-    - `value`: The value of the widget's traits as a dictionary.
-    - `widget`: The widget being wrapped.
-
-    **Initialization Args.**
-
-    - `widget`: The widget to wrap.
+    Args:
+        widget (AnyWidget): The widget to wrap.
     """
 
     def __init__(self, widget: "AnyWidget"):
@@ -94,6 +92,7 @@ class anywidget(UIElement[T, T]):
             "_esm",
             "_css",
             "_anywidget_id",
+            "_msg_callbacks",
             "_dom_classes",
             "_model_module",
             "_model_module_version",
@@ -113,18 +112,30 @@ class anywidget(UIElement[T, T]):
         for k, v in args.items():
             try:
                 # Try to see if it is json-serializable
-                json.dumps(v, cls=WebComponentEncoder)
+                WebComponentEncoder.json_dumps(v)
                 # Just add the plain value, it will be json-serialized later
                 json_args[k] = v
             except TypeError:
                 pass
-
-        def on_change(change: T) -> None:
-            for key, value in change.items():
-                widget.set_trait(key, value)
+            except ValueError:
+                # Handle circular dependencies
+                pass
 
         js: str = widget._esm if hasattr(widget, "_esm") else ""  # type: ignore [unused-ignore]  # noqa: E501
         css: str = widget._css if hasattr(widget, "_css") else ""  # type: ignore [unused-ignore]  # noqa: E501
+        import ipywidgets  # type: ignore
+
+        _remove_buffers = ipywidgets.widgets.widget._remove_buffers  # type: ignore
+        _state, buffer_paths, buffers = _remove_buffers(widget.get_state())  # type: ignore
+
+        def on_change(change: T) -> None:
+            _put_buffers = ipywidgets.widgets.widget._put_buffers  # type: ignore
+            _put_buffers(change, buffer_paths, buffers)
+            widget.set_state(change)
+
+        js_hash: str = hashlib.md5(
+            js.encode("utf-8"), usedforsecurity=False
+        ).hexdigest()
 
         super().__init__(
             component_name="marimo-anywidget",
@@ -132,7 +143,9 @@ class anywidget(UIElement[T, T]):
             label="",
             args={
                 "js-url": mo_data.js(js).url if js else "",  # type: ignore [unused-ignore]  # noqa: E501
+                "js-hash": js_hash,
                 "css": css,
+                "buffer-paths": buffer_paths,
             },
             on_change=on_change,
             functions=(

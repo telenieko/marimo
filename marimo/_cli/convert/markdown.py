@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional, Union
+from typing import Any, Callable, Literal, Optional, Union, cast
 
 # Native to python
 from xml.etree.ElementTree import Element, SubElement
@@ -22,21 +22,71 @@ from pymdownx.superfences import (  # type: ignore
     SuperFencesCodeExtension,
 )
 
+from marimo import _loggers
 from marimo._ast import codegen
 from marimo._ast.app import App, InternalApp, _AppConfig
 from marimo._ast.cell import Cell, CellConfig
 from marimo._ast.compiler import compile_cell
-from marimo._cli.convert.utils import markdown_to_marimo
+from marimo._ast.names import DEFAULT_CELL_NAME
+from marimo._convert.utils import markdown_to_marimo, sql_to_marimo
+from marimo._dependencies.dependencies import DependencyManager
+
+LOGGER = _loggers.marimo_logger()
 
 MARIMO_MD = "marimo-md"
 MARIMO_CODE = "marimo-code"
 
 ConvertKeys = Union[Literal["marimo"], Literal["marimo-app"]]
 
+# Regex captures loose yaml for frontmatter
+# Should match the following:
+# ---
+# title: "Title"
+# whatever
+# ---
+YAML_FRONT_MATTER_REGEX = re.compile(
+    r"^---\s*\n(.*?\n?)(?:---)\s*\n", re.UNICODE | re.DOTALL
+)
+
+
+def backwards_compatible_sanitization(line: str) -> str:
+    return line
+
+
+def extract_attribs(
+    line: str, fence_start: Optional[re.Match[str]] = None
+) -> dict[str, str]:
+    # Extract attributes from the code block.
+    # Blocks are expected to be like this:
+    # python {.marimo disabled="true"}
+    if fence_start is None:
+        fence_start = RE_NESTED_FENCE_START.match(line)
+
+    if fence_start:
+        # attrs is a bit of a misnomer, matches
+        # .python.marimo disabled="true"
+        inner = fence_start.group("attrs")
+        if inner:
+            return dict(re.findall(r'(\w+)="([^"]*)"', inner))
+    return {}
+
 
 def _is_code_tag(text: str) -> bool:
     head = text.split("\n")[0].strip()
-    return bool(re.search(r"\{.*python.*\}", head))
+    legacy_format = bool(re.search(r"\{.*python.*\}", head))
+    legacy_format |= bool(re.search(r"\{.*sql.*\}", head))
+    if DependencyManager.new_superfences.has_required_version(quiet=True):
+        supported_format = bool(re.search(r".*\{.*marimo.*\}", head))
+        return legacy_format or supported_format
+    return legacy_format
+
+
+def _get_language(text: str) -> str:
+    header = text.split("\n").pop(0)
+    match = RE_NESTED_FENCE_START.match(header)
+    if match and match.group("lang"):
+        return str(match.group("lang"))
+    return "python"
 
 
 def formatted_code_block(
@@ -45,14 +95,24 @@ def formatted_code_block(
     """Wraps code in a fenced code block with marimo attributes."""
     if attributes is None:
         attributes = {}
+    language = attributes.pop("language", "python")
     attribute_str = " ".join(
         [""] + [f'{key}="{value}"' for key, value in attributes.items()]
     )
     guard = "```"
     while guard in code:
         guard += "`"
+    if DependencyManager.new_superfences.has_required_version(quiet=True):
+        return "\n".join(
+            [
+                f"""{guard}{language} {{.marimo{attribute_str}}}""",
+                code,
+                guard,
+                "",
+            ]
+        )
     return "\n".join(
-        [f"""{guard}{{.python.marimo{attribute_str}}}""", code, guard, ""]
+        [f"""{guard}{{.{language}.marimo{attribute_str}}}""", code, guard, ""]
     )
 
 
@@ -60,8 +120,6 @@ def app_config_from_root(root: Element) -> _AppConfig:
     # Extract meta data from root attributes.
     config_keys = {
         "title": "app_title",
-        "marimo-layout": "layout_file",
-        "marimo-css": "css_file",
     }
     config = {
         config_keys[key]: value
@@ -72,6 +130,7 @@ def app_config_from_root(root: Element) -> _AppConfig:
     config.update({k: v for k, v in root.items() if k not in config_keys})
     # Remove values particular to markdown saves.
     config.pop("marimo-version", None)
+
     return _AppConfig.from_untrusted_dict(config)
 
 
@@ -82,6 +141,8 @@ def get_source_from_tag(tag: Element) -> str:
         if not (source and source.strip()):
             return ""
         source = markdown_to_marimo(source)
+    elif tag.attrib.get("language") == "sql":
+        source = sql_to_marimo(source, tag.attrib.get("query", "_df"))
     else:
         assert tag.tag == MARIMO_CODE, f"Unknown tag: {tag.tag}"
     return source
@@ -111,7 +172,7 @@ def _tree_to_app_obj(root: Element) -> SafeWrap:
     app = InternalApp(App(**app_config.asdict()))
 
     for child in root:
-        name = child.get("name", "__")
+        name = child.get("name", DEFAULT_CELL_NAME)
         # Default to hiding markdown cells.
         cell_config = get_cell_config_from_tag(
             child, hide_code=child.tag == MARIMO_MD
@@ -135,7 +196,7 @@ def _tree_to_app_obj(root: Element) -> SafeWrap:
                 cell_id=cell_id,
                 code=source,
                 config=cell_config,
-                name=name or "__",
+                name=name or DEFAULT_CELL_NAME,
                 cell=None,
             )
 
@@ -149,8 +210,11 @@ def _tree_to_app(root: Element) -> str:
     names: list[str] = []
     cell_config: list[CellConfig] = []
     for child in root:
-        names.append(child.get("name", "__"))
-        cell_config.append(get_cell_config_from_tag(child))
+        names.append(child.get("name", DEFAULT_CELL_NAME))
+        # Default to hiding markdown cells.
+        cell_config.append(
+            get_cell_config_from_tag(child, hide_code=child.tag == MARIMO_MD)
+        )
         sources.append(get_source_from_tag(child))
 
     return codegen.generate_filecontents(
@@ -272,15 +336,6 @@ class FrontMatterPreprocessor(Preprocessor):
         super().__init__(md)
         self.md = md
         self.md.meta = {}
-        # Regex captures loose yaml for frontmatter
-        # Should match the following:
-        # ---
-        # title: "Title"
-        # whatever
-        # ---
-        self.yaml_front_matter_regex = re.compile(
-            r"^---\s*\n(.*?\n?)(?:---)\s*\n", re.UNICODE | re.DOTALL
-        )
 
     def run(self, lines: list[str]) -> list[str]:
         import yaml
@@ -295,7 +350,7 @@ class FrontMatterPreprocessor(Preprocessor):
             return lines
 
         doc = "\n".join(lines)
-        result = self.yaml_front_matter_regex.match(doc)
+        result = YAML_FRONT_MATTER_REGEX.match(doc)
 
         if result:
             yaml_content = result.group(1)
@@ -414,25 +469,27 @@ class ExpandAndClassifyProcessor(BlockProcessor):
             code_block = SubElement(parent, MARIMO_CODE)
             block_lines = code.split("\n")
             code_block.text = "\n".join(block_lines[1:-1])
-            # Extract attributes from the code block.
-            # Blocks are expected to be like this:
-            # {.python.marimo disabled="true"}
-            fence_start = RE_NESTED_FENCE_START.match(block_lines[0])
-            if fence_start:
-                # attrs is a bit of a misnomer, matches
-                # .python.marimo disabled="true"
-                inner = fence_start.group("attrs")
-                if inner:
-                    code_block.attrib = dict(
-                        re.findall(r'(\w+)="([^"]*)"', inner)
-                    )
+
+            attribs = extract_attribs(block_lines[0])
+            if attribs:
+                code_block.attrib = attribs
+
+            # Set after to prevent lang being flushed.
+            code_block.set("language", _get_language(code))
+
         add_paragraph()
         # Flush to indicate all blocks have been processed.
         blocks.clear()
 
 
 def convert_from_md_to_app(text: str) -> App:
-    return MarimoParser(output_format="marimo-app").convert(text)  # type: ignore[arg-type, return-value]
+    if not text.strip():
+        app = App()
+    else:
+        app = cast(App, MarimoParser(output_format="marimo-app").convert(text))
+
+    app._cell_manager.ensure_one_cell()
+    return app
 
 
 def convert_from_md(text: str) -> str:

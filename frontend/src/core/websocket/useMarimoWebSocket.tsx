@@ -4,7 +4,7 @@ import { useAtom, useSetAtom } from "jotai";
 import { connectionAtom } from "../network/connection";
 import { useWebSocket } from "@/core/websocket/useWebSocket";
 import { logNever } from "@/utils/assertNever";
-import { useCellActions } from "@/core/cells/cells";
+import { getNotebook, useCellActions } from "@/core/cells/cells";
 import { AUTOCOMPLETER } from "@/core/codemirror/completion/Autocompleter";
 import type { OperationMessage } from "@/core/kernel/messages";
 import type { CellData } from "../cells/types";
@@ -39,6 +39,9 @@ import { kioskModeAtom } from "../mode";
 import { focusAndScrollCellOutputIntoView } from "../cells/scrollCellIntoView";
 import { capabilitiesAtom } from "../config/capabilities";
 import { UI_ELEMENT_REGISTRY } from "../dom/uiregistry";
+import { reloadSafe } from "@/utils/reload-safe";
+import { useRunsActions } from "../cells/runs";
+import { useDataSourceActions } from "../cells/data-source-connections";
 
 /**
  * WebSocket that connects to the Marimo kernel and handles incoming messages.
@@ -54,10 +57,13 @@ export function useMarimoWebSocket(opts: {
   const { showBoundary } = useErrorBoundary();
 
   const { handleCellMessage, setCellCodes, setCellIds } = useCellActions();
+  const { addCellOperation } = useRunsActions();
   const setAppConfig = useSetAppConfig();
   const { setVariables, setMetadata } = useVariablesActions();
   const { addColumnPreview } = useDatasetsActions();
   const { addDatasets, filterDatasetsFromVariables } = useDatasetsActions();
+  const { addDataSourceConnection, filterDataSourcesFromVariables } =
+    useDataSourceActions();
   const { setLayoutData } = useLayoutActions();
   const [connection, setConnection] = useAtom(connectionAtom);
   const { addBanner } = useBannersActions();
@@ -69,7 +75,7 @@ export function useMarimoWebSocket(opts: {
     const msg = jsonParseWithSpecialChar(e.data);
     switch (msg.op) {
       case "reload":
-        window.location.reload();
+        reloadSafe();
         return;
       case "kernel-ready":
         handleKernelReady(msg.data, {
@@ -109,9 +115,15 @@ export function useMarimoWebSocket(opts: {
           msg.data,
         );
         return;
-      case "cell-op":
+      case "cell-op": {
         handleCellOperation(msg.data, handleCellMessage);
+        const cellData = getNotebook().cellData[msg.data.cell_id as CellId];
+        if (!cellData) {
+          return;
+        }
+        addCellOperation({ cellOperation: msg.data, code: cellData.code });
         return;
+      }
 
       case "variables":
         setVariables(
@@ -122,6 +134,9 @@ export function useMarimoWebSocket(opts: {
           })),
         );
         filterDatasetsFromVariables(
+          msg.data.variables.map((v) => v.name as VariableName),
+        );
+        filterDataSourcesFromVariables(
           msg.data.variables.map((v) => v.name as VariableName),
         );
         return;
@@ -180,6 +195,9 @@ export function useMarimoWebSocket(opts: {
       case "data-column-preview":
         addColumnPreview(msg.data);
         return;
+      case "data-source-connections":
+        addDataSourceConnection(msg.data);
+        return;
 
       case "reconnected":
         return;
@@ -191,6 +209,7 @@ export function useMarimoWebSocket(opts: {
         setCellCodes({
           codes: msg.data.codes,
           ids: msg.data.cell_ids as CellId[],
+          codeIsStale: msg.data.code_is_stale,
         });
         return;
       case "update-cell-ids":
@@ -234,6 +253,7 @@ export function useMarimoWebSocket(opts: {
       try {
         handleMessage(e);
       } catch (error) {
+        Logger.error("Failed to handle message", error);
         toast({
           title: "Failed to handle message",
           description: prettyError(error),
@@ -253,6 +273,7 @@ export function useMarimoWebSocket(opts: {
             state: WebSocketState.CLOSED,
             code: WebSocketClosedReason.ALREADY_RUNNING,
             reason: "another browser tab is already connected to the kernel",
+            canTakeover: true,
           });
           ws.close(); // close to prevent reconnecting
           return;

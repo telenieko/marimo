@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 from inspect import cleandoc
+from textwrap import dedent
 
 import pytest
 
@@ -249,6 +250,49 @@ def test_nested_comprehensions() -> None:
     assert v.defs == set()
     assert v.refs == set(["range"])
     assert not v.variable_data
+
+
+def test_comprehension_generator() -> None:
+    code = "\n".join(
+        [
+            "[x for x in x]",
+        ]
+    )
+    v = visitor.ScopedVisitor()
+    mod = ast.parse(code)
+    v.visit(mod)
+    assert v.defs == set()
+    assert v.refs == set(["x"])
+    assert not v.variable_data
+
+
+def test_nested_comprehension_generator() -> None:
+    code = "\n".join(
+        [
+            "[x for x in x for x in x]",
+        ]
+    )
+    v = visitor.ScopedVisitor()
+    mod = ast.parse(code)
+    v.visit(mod)
+    assert v.defs == set()
+    assert v.refs == set(["x"])
+    assert not v.variable_data
+
+
+def test_nested_comprehension_generator_with_named_expr() -> None:
+    code = "\n".join(
+        [
+            "[(x := x) for x in x for x in x]",
+        ]
+    )
+    v = visitor.ScopedVisitor()
+    mod = ast.parse(code)
+    v.visit(mod)
+    # named expr kicks x out, evicting the ref
+    assert v.defs == set(["x"])
+    assert v.refs == set()
+    assert v.variable_data == {"x": [VariableData(kind="variable")]}
 
 
 def test_walrus_leaks_to_global_in_comprehension() -> None:
@@ -927,6 +971,22 @@ def test_sql_statement_with_marimo_sql() -> None:
 
 
 @pytest.mark.skipif(not HAS_DEPS, reason="Requires duckdb")
+@pytest.mark.parametrize(
+    "code",
+    [
+        "df = duckdb.sql('select * from cars')",
+        "df = duckdb.execute('select * from cars')",
+    ],
+)
+def test_sql_statement_with_duckdb_sql(code: str) -> None:
+    v = visitor.ScopedVisitor()
+    mod = ast.parse(code)
+    v.visit(mod)
+    assert v.defs == set(["df"])
+    assert v.refs == set(["cars", "duckdb"])
+
+
+@pytest.mark.skipif(not HAS_DEPS, reason="Requires duckdb")
 def test_sql_statement_with_f_string() -> None:
     code = "\n".join(
         [
@@ -958,32 +1018,40 @@ def test_print_f_string() -> None:
     import ast
 
     joined_str = ast.parse("f'select * from cars where name = {name}'")
+    assert isinstance(joined_str.body[0].value, ast.JoinedStr)  # type: ignore
     assert (
         normalize_sql_f_string(joined_str.body[0].value)  # type: ignore
-        == "select * from cars where name = '_'"
+        == "select * from cars where name = null"
     )
 
     joined_str = ast.parse(
         "f'select * from \\'{table}\\' where name = {name}'"
     )
+    assert isinstance(joined_str.body[0].value, ast.JoinedStr)  # type: ignore
     assert (
         normalize_sql_f_string(joined_str.body[0].value)  # type: ignore
-        == "select * from '_' where name = '_'"
+        == "select * from 'null' where name = null"
     )
 
 
 @pytest.mark.skipif(not HAS_DEPS, reason="Requires duckdb")
 def test_sql_empty_statement() -> None:
-    code = "\n".join(
-        [
-            "mo.sql('')",
-        ]
-    )
+    code = "mo.sql('')"
     v = visitor.ScopedVisitor()
     mod = ast.parse(code)
     v.visit(mod)
     assert v.defs == set([])
     assert v.refs == set(["mo"])
+
+
+@pytest.mark.skipif(not HAS_DEPS, reason="Requires duckdb")
+def test_sql_empty_statement_duckdb() -> None:
+    code = "duckdb.sql('')"
+    v = visitor.ScopedVisitor()
+    mod = ast.parse(code)
+    v.visit(mod)
+    assert v.defs == set([])
+    assert v.refs == set(["duckdb"])
 
 
 @pytest.mark.skipif(not HAS_DEPS, reason="Requires duckdb")
@@ -1026,8 +1094,26 @@ def test_sql_statement_with_url() -> None:
     v = visitor.ScopedVisitor()
     mod = ast.parse(code)
     v.visit(mod)
-    assert v.defs == set()
+    assert v.defs == set(["cars"])
+    assert v.variable_data == {"cars": [VariableData("table")]}
     assert v.refs == set(["mo"])
+
+
+@pytest.mark.skipif(not HAS_DEPS, reason="Requires duckdb")
+def test_sql_statement_with_function() -> None:
+    code = dedent('''
+    prompt_embeddings = mo.sql(
+        f"""
+        SELECT *, embedding(text) as text_embedding
+        FROM prompts;
+        """
+    )
+    ''')
+    v = visitor.ScopedVisitor()
+    mod = ast.parse(code)
+    v.visit(mod)
+    assert v.defs == set(["prompt_embeddings"])
+    assert v.refs == set(["mo", "prompts"])
 
 
 @pytest.mark.skipif(not HAS_DEPS, reason="Requires duckdb")
@@ -1043,3 +1129,71 @@ def test_unparsable_sql_doesnt_fail() -> None:
     v.visit(mod)
     assert v.defs == set(["df"])
     assert v.refs == set(["mo"])
+
+
+@pytest.mark.skipif(not HAS_DEPS, reason="Requires duckdb")
+def test_sql_attach() -> None:
+    code = "\n".join(
+        [
+            "mo.sql(f\"ATTACH 'dbname=postgres user=postgres host=127.0.0.1 password=password' as db\")"  # noqa:E501
+        ]
+    )
+    v = visitor.ScopedVisitor()
+    mod = ast.parse(code)
+    v.visit(mod)
+    assert v.defs == set(["db"])
+    assert v.refs == set(["mo"])
+
+
+@pytest.mark.skipif(not HAS_DEPS, reason="Requires duckdb")
+def test_sql_attach_f_string() -> None:
+    code = "\n".join(
+        [
+            "mo.sql(f\"ATTACH 'dbname=postgres user=postgres host=127.0.0.1 password={PASSWORD}' as db\")"  # noqa:E501
+        ]
+    )
+    v = visitor.ScopedVisitor()
+    mod = ast.parse(code)
+    v.visit(mod)
+    assert v.defs == set(["db"])
+    assert v.refs == set(["mo", "PASSWORD"])
+
+
+@pytest.mark.skipif(not HAS_DEPS, reason="Requires duckdb")
+def test_sql_int_f_string() -> None:
+    code = "\n".join(["mo.sql(f'SELECT * FROM df LIMIT {lim}')"])
+    v = visitor.ScopedVisitor()
+    mod = ast.parse(code)
+    v.visit(mod)
+    assert not v.defs
+    assert v.refs == set(["mo", "df", "lim"])
+
+
+@pytest.mark.skipif(not HAS_DEPS, reason="Requires duckdb")
+def test_sql_column_f_string() -> None:
+    code = "\n".join(["mo.sql(f'SELECT {col} FROM df LIMIT {lim}')"])
+    v = visitor.ScopedVisitor()
+    mod = ast.parse(code)
+    v.visit(mod)
+    assert not v.defs
+    assert v.refs == set(["mo", "df", "lim", "col"])
+
+
+@pytest.mark.skipif(not HAS_DEPS, reason="Requires duckdb")
+def test_sql_value_f_string() -> None:
+    code = "\n".join(["mo.sql(f'SELECT * FROM df WHERE {col} = {val}')"])
+    v = visitor.ScopedVisitor()
+    mod = ast.parse(code)
+    v.visit(mod)
+    assert not v.defs
+    assert v.refs == set(["mo", "df", "col", "val"])
+
+
+@pytest.mark.skipif(not HAS_DEPS, reason="Requires duckdb")
+def test_sql_table_f_string() -> None:
+    code = "\n".join(["mo.sql(f'SELECT * FROM {my_table} LIMIT {lim}')"])
+    v = visitor.ScopedVisitor()
+    mod = ast.parse(code)
+    v.visit(mod)
+    assert not v.defs
+    assert v.refs == set(["mo", "my_table", "lim"])

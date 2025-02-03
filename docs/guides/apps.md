@@ -9,46 +9,18 @@ grid editor; you can also choose to include code in the app view.
 
 ## CLI
 
+Run marimo notebooks as apps with
+
 ```
-Usage: marimo run [OPTIONS] NAME [ARGS]...
-
-  Run a notebook as an app in read-only mode.
-
-  If NAME is a url, the notebook will be downloaded to a temporary file.
-
-  Example:
-
-      * marimo run notebook.py
-
-Options:
-  -p, --port INTEGER     Port to attach to.
-  --host TEXT            Host to attach to.  [default: 127.0.0.1]
-  --proxy TEXT           Address of reverse proxy.
-  --headless             Don't launch a browser.
-  --token / --no-token   Use a token for authentication. This enables session-
-                         based authentication. A random token will be
-                         generated if --token-password is not set.
-
-                         If --no-token is set, session-based authentication
-                         will not be used.  [default: no-token]
-  --token-password TEXT  Use a specific token for authentication. This enables
-                         session-based authentication. A random token will be
-                         generated if not set.
-  --include-code         Include notebook code in the app.
-  --watch                Watch the file for changes and reload the app. If
-                         watchdog is installed, it will be used to watch the
-                         file. Otherwise, file watcher will poll the file
-                         every 1s.
-  --base-url TEXT        Base URL for the server. Should start with a /.
-  --allow-origins TEXT   Allowed origins for CORS. Can be repeated.
-  --redirect-console-to-browser  Redirect stdout and stderr to the browser console.
-  --help                 Show this message and exit.
+marimo run notebook.py
 ```
+
+View the [CLI documentation](../cli.md#marimo-run) for more details.
 
 ## Layout
 
 While editing a notebook with `marimo edit`, you can preview the notebook
-as an app by clicking the preview button in the bottom-left of the editor.
+as an app by clicking the preview button in the bottom-right of the editor.
 (You can also use the command palette.)
 
 ### Vertical layout

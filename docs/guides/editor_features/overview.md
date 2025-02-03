@@ -11,28 +11,26 @@ as well as user-wide configuration that will apply to all your notebooks.
 These settings include the option to display the current notebook in
 full width, to use vim keybindings, to enable GitHub copilot, and more.
 
-To access these settings, click the gear icon in the top-right of the editor.
+To access these settings, click the gear icon in the top-right of the editor:
 
-<div align="left">
-<figure>
-<img src="/_static/docs-user-config.png"/ style="height:80px">
-<figcaption>Configure settings.</figcaption>
-</figure>
+<div align="center">
+<img src="/_static/docs-user-config.png"  />
 </div>
 
 A non-exhaustive list of settings:
 
 - Outputs above or below code cells
-- [Disable/enable autorun](/guides/reactivity.md#runtime-configuration)
+- [Disable/enable autorun](../reactivity.md#configuring-how-marimo-runs-cells)
+- Package installation
 - Vim keybindings
 - Dark mode
 - Auto-save
 - Auto-complete
 - Editor font-size
 - Code formatting with ruff/black
-- [GitHub Copilot](/guides/editor_features/ai_completion.md)
-- [LLM coding assistant](/guides/editor_features/ai_completion.md)
-- [Module autoreloading](/guides/reactivity.md#module-change)
+- [GitHub Copilot](ai_completion.md)
+- [LLM coding assistant](ai_completion.md)
+- [Module autoreloading](../configuration/runtime_configuration.md#on-module-change)
 
 ### Vim keybindings
 
@@ -43,56 +41,31 @@ marimo supports vim keybindings.
 - `gd` - go to definition
 - `dd` - when a cell is empty, delete it
 
-<div align="center">
-<figure>
-<img src="/_static/docs-settings.png"/>
-<figcaption>Click the gear icon to access notebook and editor settings.</figcaption>
-</figure>
-</div>
-
 ## Overview panels
 
-marimo ships with the IDE panels that provide an overview of your notebook:
+marimo ships with the IDE panels that provide an overview of your notebook
 
-::::{grid} 1 1 2 2
-
-:::{card}
-
-<figure>
-<img src="/_static/docs-panel-icons.png" style="height: 400px"/>
-</figure>
-:::
-
-:::{card}
-
-1. **file explorer**: view the file tree, open other notebooks
-2. **variables**: explore variable values, see where they are defined and used, with go-to-definition
-2. **data explorer**: see dataframe and table schemas at a glance
-3. **dependency graph**: view dependencies between cells, drill-down on nodes and edges
-4. **table of contents**: corresponding to your markdown
-5. **documentation** - move your text cursor over a symbol to see its documentation
-6. **logs**: a continuous stream of stdout and stderr
-7. **scratchpad**: a scratchpad cell where you can execute throwaway code
-8. **snippets** - searchable snippets to copy directly into your notebook
-9. **feedback** - share feedback!
-:::
-
-::::
+- **file explorer**: view the file tree, open other notebooks
+- **variables**: explore variable values, see where they are defined and used, with go-to-definition
+- **data explorer**: see dataframe and table schemas at a glance
+- **dependency graph**: view dependencies between cells, drill-down on nodes and edges
+- **package manager**: add and remove packages, and view your current environment
+- **table of contents**: corresponding to your markdown
+- **documentation** - move your text cursor over a symbol to see its documentation
+- **logs**: a continuous stream of stdout and stderr
+- **scratchpad**: a scratchpad cell where you can execute throwaway code
+- **snippets** - searchable snippets to copy directly into your notebook
+- **feedback** - share feedback!
 
 These panels can be toggled via the buttons in the left of the editor.
 
 ## Cell actions
 
-Click the dot array to the right of a cell to pull up a context menu, or hold
-and drag to move the cell:
+Click the three dots in the top right of a cell to pull up a context menu,
+letting you format code, hide code, send a cell to the top or bottom of the
+notebook, give the cell a name, and more.
 
-<div align="center">
-<figure>
-<img src="/_static/docs-cell-actions.png"/>
-<figcaption>Access cell actions like code formatting, hiding code, and more
-through the cell context menu.</figcaption>
-</figure>
-</div>
+Drag a cell using the vertical dots to the right of the cell.
 
 ## Right-click menus
 
@@ -110,9 +83,7 @@ create.
 ## Keyboard shortcuts
 
 We've kept some well-known [keyboard
-shortcuts](/guides/editor_features/hotkeys.md) for notebooks (`Ctrl-Enter`,
-`Shift-Enter`), dropped others, and added a few of our own. Hit
-`Ctrl/Cmd-Shift-H` to pull up the shortcuts.
+shortcuts](hotkeys.md) for notebooks (`Ctrl-Enter`, `Shift-Enter`), dropped others, and added a few of our own. Hit `Ctrl/Cmd-Shift-H` to pull up the shortcuts.
 
 We know keyboard shortcuts are very personal; you can remap them in the
 configuration.
@@ -134,13 +105,31 @@ Hit `Cmd/Ctrl+K` to open the command palette.
 _Missing a command? File a
 [GitHub issue](https://github.com/marimo-team/marimo/issues)._
 
-## Share on our online playground
+## Editor widths
 
-Get a link to share your notebook via our [online playground](/guides/wasm.md):
+You can set the width of the editor in the notebook settings:
+
+- **Compact**: A narrow width with generous margins, ideal for reading
+- **Wide**: A wider layout that gives more space for content
+- **Full**: Uses the full width of your browser window, ideal for dashboard-style notebooks
+- **Multi-column**: Splits your notebook into multiple columns, letting you view and edit cells side-by-side. This is only possible because marimo models your notebook as a directed acyclic graph (DAG) and the [execution order](../reactivity.md#execution-order) is determined by the relationships between
+cells and their variables, not by the order of cells on the page.
 
 <div align="center">
 <figure>
-<img src="/_static/share-wasm-link.gif"/>
+<img src="/_static/docs-multi-column.png"/>
+<figcaption>Multi-column notebook</figcaption>
+</figure>
+</div>
+
+## Share on our online playground
+
+Get a link to share your notebook via our [online playground](../wasm.md):
+
+<div align="center">
+<figure>
+<video autoplay muted loop width="100%" height="100%" align="center" src="/_static/share-wasm-link.webm">
+</video>
 </figure>
 </div>
 
@@ -181,5 +170,5 @@ tiniest quibbles to the biggest blue-sky dreams.
 If you'd like your feedback to start a conversation (we'd love to talk with
 you!), please consider posting in our [GitHub
 issues](https://github.com/marimo-team/marimo/issues) or
-[Discord](https://discord.gg/JE7nhX6mD8). But if you're in a flow state and
+[Discord](https://marimo.io/discord?ref=docs). But if you're in a flow state and
 can't context switch out, the feedback form has your back.

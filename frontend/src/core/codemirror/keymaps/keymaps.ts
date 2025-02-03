@@ -34,8 +34,9 @@ export function keymapBundle(
       ];
     case "vim":
       return [
+        keymap.of(defaultKeymap),
         // delete the cell on double press of "d", if the cell is empty
-        Prec.highest(
+        Prec.high(
           doubleCharacterListener(
             "d",
             (view) => view.state.doc.toString() === "",
@@ -48,10 +49,10 @@ export function keymapBundle(
             },
           ),
         ),
+        // Base vim mode
         vim({ status: false }),
-        // Needs to come after the vim extension
-        vimKeymapExtension(callbacks),
-        keymap.of(defaultKeymap),
+        // Custom vim keymaps for cell navigation
+        Prec.high(vimKeymapExtension(callbacks)),
       ];
     default:
       logNever(config.preset);
